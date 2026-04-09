@@ -555,10 +555,21 @@ DEFAULT_CONFIG = {
     },
 
     "cron": {
-        # Wrap delivered cron responses with a header (task name) and footer
-        # ("The agent cannot see this message").  Set to false for clean output.
+        # Wrap delivered cron responses with a header showing the task name.
+        # Set to false for clean output without the header.
         "wrap_response": True,
     },
+
+    # Per-chat secrets — inject environment variables based on chat ID.
+    # Keys are "platform:chat_id" strings, values are dicts of env vars.
+    # Example:
+    #   chat_secrets:
+    #     "telegram:-1001111111111":
+    #       GITHUB_TOKEN: ghp_token_for_repo_A
+    #     "telegram:-1002222222222":
+    #       GITHUB_TOKEN: ghp_token_for_repo_B
+    # Secrets are set as env vars at session start and cleared after.
+    "chat_secrets": {},
 
     # Logging — controls file logging to ~/.hermes/logs/.
     # agent.log captures INFO+ (all agent activity); errors.log captures WARNING+.
@@ -1397,6 +1408,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "memory", "gateway",
+    "chat_secrets",
 }
 
 # Valid fields inside a custom_providers list entry

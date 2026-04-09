@@ -5932,19 +5932,67 @@ class GatewayRunner:
         return True
 
     def _set_session_env(self, context: SessionContext) -> None:
-        """Set environment variables for the current session."""
-        os.environ["HERMES_SESSION_PLATFORM"] = context.source.platform.value
-        os.environ["HERMES_SESSION_CHAT_ID"] = context.source.chat_id
+        """Set environment variables for the current session.
+
+        In addition to the standard HERMES_SESSION_* vars, this injects
+        per-chat secrets from the ``chat_secrets`` config section.  Keys in
+        that section are ``"platform:chat_id"`` strings and values are dicts
+        of env-var name → value.  The matching is tried in order:
+
+        1. ``"platform:chat_id"``   (e.g. ``"telegram:-1001234567890"``)
+        2. ``"platform:*"``         (wildcard — all chats on that platform)
+        """
+        platform_value = context.source.platform.value
+        chat_id = context.source.chat_id
+
+        os.environ["HERMES_SESSION_PLATFORM"] = platform_value
+        os.environ["HERMES_SESSION_CHAT_ID"] = chat_id
         if context.source.chat_name:
             os.environ["HERMES_SESSION_CHAT_NAME"] = context.source.chat_name
         if context.source.thread_id:
             os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
-    
+
+        # ── Per-chat secrets injection ──────────────────────────────────
+        self._chat_secret_keys: list[str] = []  # track for cleanup
+        try:
+            raw_cfg = _load_gateway_config()
+            secrets_map = raw_cfg.get("chat_secrets") or {}
+            if not secrets_map:
+                return
+
+            chat_key = f"{platform_value}:{chat_id}"
+            wildcard_key = f"{platform_value}:*"
+
+            env_vars: dict[str, str] = {}
+            # Wildcard first, then specific overrides on top
+            if wildcard_key in secrets_map and isinstance(secrets_map[wildcard_key], dict):
+                env_vars.update(secrets_map[wildcard_key])
+            if chat_key in secrets_map and isinstance(secrets_map[chat_key], dict):
+                env_vars.update(secrets_map[chat_key])
+
+            for key, value in env_vars.items():
+                os.environ[key] = str(value)
+                self._chat_secret_keys.append(key)
+
+            if self._chat_secret_keys:
+                logger.debug(
+                    "Injected %d chat secret(s) for %s",
+                    len(self._chat_secret_keys), chat_key,
+                )
+        except Exception as e:
+            logger.warning("Failed to inject chat_secrets: %s", e)
+
     def _clear_session_env(self) -> None:
-        """Clear session environment variables."""
+        """Clear session environment variables and per-chat secrets."""
         for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
             if var in os.environ:
                 del os.environ[var]
+
+        # Clean up per-chat secrets
+        for key in getattr(self, "_chat_secret_keys", []):
+            if key in os.environ:
+                del os.environ[key]
+        self._chat_secret_keys = []
     
     async def _enrich_message_with_vision(
         self,
