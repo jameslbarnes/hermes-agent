@@ -272,8 +272,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         delivery_content = (
             f"Cronjob Response: {task_name}\n"
             f"-------------\n\n"
-            f"{content}\n\n"
-            f"Note: The agent cannot see this message, and therefore cannot respond to it."
+            f"{content}"
         )
     else:
         delivery_content = content
