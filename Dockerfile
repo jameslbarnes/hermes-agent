@@ -10,7 +10,7 @@ COPY . /opt/hermes
 WORKDIR /opt/hermes
 
 # Install Python and Node dependencies in one layer, no cache
-RUN pip install --no-cache-dir -r requirements-all.lock -e . --break-system-packages && \
+RUN pip install --no-cache-dir --ignore-installed -r requirements-all.lock -e . --break-system-packages && \
     npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
     cd /opt/hermes/scripts/whatsapp-bridge && \
