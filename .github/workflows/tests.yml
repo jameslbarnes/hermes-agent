@@ -34,7 +34,16 @@ jobs:
           source .venv/bin/activate
           uv pip install -e ".[all,dev]"
 
-      - name: Run tests
+      - name: Run sandbox security tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/gateway/test_permissions.py tests/tools/test_sandbox_enforcement.py -v --tb=short
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+      - name: Run all tests
         run: |
           source .venv/bin/activate
           python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto

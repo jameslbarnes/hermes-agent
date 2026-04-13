@@ -14,6 +14,29 @@ from agent.redact import redact_sensitive_text
 logger = logging.getLogger(__name__)
 
 
+def _check_file_sandbox(path: str) -> str | None:
+    """If HERMES_SANDBOX_ROOT is set, verify the path is inside the sandbox.
+
+    Returns None if allowed, or a JSON error string if blocked.
+    """
+    sandbox_root = os.environ.get("HERMES_SANDBOX_ROOT", "").strip()
+    if not sandbox_root:
+        return None
+    try:
+        sandbox = Path(sandbox_root).resolve()
+        target = Path(path).expanduser().resolve()
+        if target == sandbox or sandbox in target.parents:
+            return None
+        return json.dumps({
+            "error": (
+                f"Blocked: path '{path}' is outside this chat's workspace. "
+                f"File access is restricted to the sandbox directory."
+            ),
+        })
+    except (OSError, ValueError) as e:
+        return json.dumps({"error": f"Blocked: could not resolve path '{path}': {e}"})
+
+
 _EXPECTED_WRITE_ERRNOS = {errno.EACCES, errno.EPERM, errno.EROFS}
 
 # ---------------------------------------------------------------------------
@@ -280,6 +303,11 @@ def clear_file_ops_cache(task_id: str = None):
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
+        # ── Sandbox guard ─────────────────────────────────────────────
+        _sandbox_err = _check_file_sandbox(path)
+        if _sandbox_err:
+            return _sandbox_err
+
         # ── Device path guard ─────────────────────────────────────────
         # Block paths that would hang the process (infinite output,
         # blocking on input).  Pure path check — no I/O.
@@ -570,6 +598,9 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
 
 def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     """Write content to a file."""
+    _sandbox_err = _check_file_sandbox(path)
+    if _sandbox_err:
+        return _sandbox_err
     sensitive_err = _check_sensitive_path(path)
     if sensitive_err:
         return tool_error(sensitive_err)
@@ -596,6 +627,18 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default") -> str:
     """Patch a file using replace mode or V4A patch format."""
+    # ── Sandbox guard ─────────────────────────────────────────────
+    if path:
+        _sandbox_err = _check_file_sandbox(path)
+        if _sandbox_err:
+            return _sandbox_err
+    if mode == "patch" and patch:
+        import re as _sandbox_re
+        for _m in _sandbox_re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _sandbox_re.MULTILINE):
+            _sandbox_err = _check_file_sandbox(_m.group(1).strip())
+            if _sandbox_err:
+                return _sandbox_err
+
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
     if path:
@@ -654,6 +697,10 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 output_mode: str = "content", context: int = 0,
                 task_id: str = "default") -> str:
     """Search for content or files."""
+    # ── Sandbox guard ─────────────────────────────────────────────
+    _sandbox_err = _check_file_sandbox(path)
+    if _sandbox_err:
+        return _sandbox_err
     try:
         # Track searches to detect *consecutive* repeated search loops.
         # Include pagination args so users can page through truncated

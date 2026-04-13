@@ -22,3 +22,4 @@ RUN chmod +x /opt/hermes/docker/entrypoint.sh
 
 ENV HERMES_HOME=/opt/data
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]
+CMD ["gateway", "run"]

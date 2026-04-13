@@ -404,6 +404,102 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+def _detect_owner_mention(text: str) -> bool:
+    """Check if a message mentions or asks for the owner.
+
+    Looks for @james, "james", "ask james", etc.  The owner name is read
+    from SOUL.md or falls back to "james".  Case-insensitive.
+    """
+    import re
+    if not text:
+        return False
+
+    # Read owner name from config/env — fall back to "james"
+    owner_name = os.environ.get("HERMES_OWNER_NAME", "james").lower()
+
+    text_lower = text.lower()
+
+    # Direct @mention or name reference
+    patterns = [
+        rf"@{re.escape(owner_name)}\b",
+        rf"\b{re.escape(owner_name)}\b.*\b(think|thought|opinion|thoughts|know|input|take)\b",
+        rf"\b(ask|check with|ping|tell|message)\b.*\b{re.escape(owner_name)}\b",
+        rf"\b{re.escape(owner_name)}\b.*\b(would|might|probably|should)\b",
+    ]
+    return any(re.search(p, text_lower) for p in patterns)
+
+
+def _build_group_memory_digest(max_chars_per_group: int = 800) -> str:
+    """Build a read-only digest of all group chat memories for the owner's DM.
+
+    Scans memories/chats/ for MEMORY.md files and returns a formatted block
+    with each group's memory truncated to max_chars_per_group.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        chats_dir = get_hermes_home() / "memories" / "chats"
+        if not chats_dir.exists():
+            return ""
+
+        sections = []
+        for scope_dir in sorted(chats_dir.iterdir()):
+            if not scope_dir.is_dir():
+                continue
+            memory_file = scope_dir / "MEMORY.md"
+            if not memory_file.exists():
+                continue
+            content = memory_file.read_text(encoding="utf-8").strip()
+            if not content:
+                continue
+
+            # scope_dir.name is "platform:chat_id"
+            scope_name = scope_dir.name
+            # Try to get a friendly name from the permissions store
+            friendly_name = scope_name
+            try:
+                from gateway.permissions import list_chats
+                all_chats = list_chats()
+                entry = all_chats.get(scope_name, {})
+                if entry.get("chat_name"):
+                    friendly_name = entry["chat_name"]
+            except Exception:
+                pass
+
+            if len(content) > max_chars_per_group:
+                content = content[:max_chars_per_group] + "…"
+            sections.append(f"### {friendly_name}\n{content}")
+
+        if not sections:
+            return ""
+
+        return (
+            "## Group Context (read-only)\n"
+            "Below are memory summaries from your group chats. "
+            "Use this context when relevant but do not modify these memories from the DM.\n\n"
+            + "\n\n".join(sections)
+        )
+    except Exception:
+        logger.debug("Failed to build group memory digest", exc_info=True)
+        return ""
+
+
+def _is_owner_dm(source: "SessionSource", gateway_config) -> bool:
+    """Check if the message is from the owner's 1:1 DM (home channel).
+
+    Returns True only when *both* conditions hold:
+      1. The chat type is "dm"
+      2. The chat_id matches the platform's configured home_channel
+    Everything else (groups, other users' DMs, channels) returns False.
+    """
+    if source.chat_type != "dm":
+        return False
+    home = gateway_config.get_home_channel(source.platform)
+    if home is None:
+        # No home channel configured — be conservative, deny tools
+        return False
+    return str(source.chat_id) == str(home.chat_id)
+
+
 def _load_gateway_config() -> dict:
     """Load and parse ~/.hermes/config.yaml, returning {} on any error."""
     try:
@@ -558,6 +654,10 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+
+        # Owner mention escalations: pending drafts waiting for /send, /edit, /skip
+        # Key: chat_id, Value: {message, user_name, chat_name, source, draft}
+        self._pending_escalations: Dict[str, dict] = {}
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -1914,6 +2014,40 @@ class GatewayRunner:
                 label = response_text if len(response_text) <= 20 else response_text[:20] + "…"
                 return f"✓ Sent `{label}` to the update process."
 
+        # ── New-chat notification ──────────────────────────────────────
+        # When the bot sees a chat for the first time (group, DM from
+        # someone other than owner), notify the owner's home channel so
+        # they can grant permissions via /allow.
+        from gateway.permissions import record_chat
+        if not _is_owner_dm(source, self.config):
+            platform_name = source.platform.value if source.platform else "unknown"
+            is_new = record_chat(
+                platform_name,
+                source.chat_id,
+                chat_name=source.chat_name or "",
+                chat_type=source.chat_type or "",
+                user_name=source.user_name or "",
+            )
+            if is_new:
+                home = self.config.get_home_channel(source.platform)
+                adapter = self.adapters.get(source.platform)
+                if home and adapter:
+                    _chat_label = source.chat_name or source.chat_id
+                    _user_label = source.user_name or source.user_id or "unknown"
+                    await adapter.send(
+                        home.chat_id,
+                        f"🆕 New chat detected:\n"
+                        f"• **Name:** {_chat_label}\n"
+                        f"• **Type:** {source.chat_type}\n"
+                        f"• **User:** {_user_label}\n"
+                        f"• **Chat ID:** `{source.chat_id}`\n\n"
+                        f"Tools are disabled for this chat. To grant access:\n"
+                        f"`/allow {source.chat_id} all`\n"
+                        f"or selectively:\n"
+                        f"`/allow {source.chat_id} web,skills`\n\n"
+                        f"See all chats: `/permissions list`",
+                    )
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -2220,6 +2354,15 @@ class GatewayRunner:
         if canonical == "voice":
             return await self._handle_voice_command(event)
 
+        if canonical in ("allow", "revoke", "permissions"):
+            return await self._handle_permissions_command(event, canonical)
+
+        if canonical == "repos":
+            return await self._handle_repos_command(event)
+
+        if canonical in ("send", "edit", "skip"):
+            return await self._handle_escalation_command(event, canonical)
+
         # User-defined quick commands (bypass agent loop, no LLM call)
         if command:
             if isinstance(self.config, dict):
@@ -2415,7 +2558,16 @@ class GatewayRunner:
 
         # Build the context prompt to inject
         context_prompt = build_session_context_prompt(context, redact_pii=_redact_pii)
-        
+
+        # ── Group memory digest for owner DM ──────────────────────────
+        # When the owner is in their home channel DM, inject read-only
+        # summaries of each group's MEMORY.md so they have a live
+        # dashboard of what's happening across groups.
+        if _is_owner_dm(source, self.config):
+            group_digest = _build_group_memory_digest()
+            if group_digest:
+                context_prompt += "\n\n" + group_digest
+
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):
@@ -2970,6 +3122,77 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
+            # ── Owner mention escalation ──────────────────────────────
+            # If this is a non-owner chat and the message mentions the
+            # owner, forward to the owner's DM for draft/approve instead
+            # of (or alongside) running the agent normally.
+            if not _is_owner_dm(source, self.config) and _detect_owner_mention(message_text):
+                home = self.config.get_home_channel(source.platform)
+                adapter = self.adapters.get(source.platform)
+                if home and adapter:
+                    _chat_label = source.chat_name or source.chat_id
+                    _user_label = source.user_name or source.user_id or "unknown"
+
+                    # Store the escalation for /send, /edit, /skip
+                    self._pending_escalations[source.chat_id] = {
+                        "message": message_text,
+                        "user_name": _user_label,
+                        "chat_name": _chat_label,
+                        "chat_id": source.chat_id,
+                        "platform": source.platform,
+                    }
+
+                    await adapter.send(
+                        home.chat_id,
+                        f"💬 **You were mentioned in {_chat_label}**\n"
+                        f"**@{_user_label}:** {message_text}\n\n"
+                        f"I'll draft a response using your context. One moment...",
+                    )
+
+                    # Generate a draft using the OWNER's memory/context
+                    # (temporarily unscope memory so we read the owner's)
+                    _saved_scope = os.environ.pop("HERMES_MEMORY_SCOPE", None)
+                    try:
+                        draft_result = await self._run_agent(
+                            message=(
+                                f"Someone in the '{_chat_label}' group said: \"{message_text}\"\n\n"
+                                f"Draft a brief response IN THIRD PERSON about what James thinks/knows about this. "
+                                f"Use James's memory and past context to inform the response. "
+                                f"Speak as Hermes relaying James's perspective, e.g. 'James has mentioned...' or "
+                                f"'Based on James's notes...'. Never write as if you ARE James. "
+                                f"Keep it concise — 2-3 sentences max. "
+                                f"Output ONLY the draft response text, nothing else."
+                            ),
+                            context_prompt=context_prompt,
+                            history=[],  # Fresh context for the draft
+                            source=source,
+                            session_id=session_entry.session_id + "_draft",
+                            session_key=session_key + ":draft",
+                        )
+                    finally:
+                        if _saved_scope:
+                            os.environ["HERMES_MEMORY_SCOPE"] = _saved_scope
+
+                    draft = (draft_result.get("final_response") or "").strip()
+                    self._pending_escalations[source.chat_id]["draft"] = draft
+
+                    await adapter.send(
+                        home.chat_id,
+                        f"**Draft response for {_chat_label}:**\n\n"
+                        f"> {draft}\n\n"
+                        f"`/send {source.chat_id}` — post this\n"
+                        f"`/edit {source.chat_id} <your rewrite instructions>` — revise then send\n"
+                        f"`/skip {source.chat_id}` — don't respond",
+                    )
+
+                    # Also let the group agent respond normally (without tools)
+                    # so the group isn't left hanging
+                    await adapter.send(
+                        source.chat_id,
+                        "Let me check with James — I'll get back to you.",
+                    )
+                    return
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -2999,6 +3222,7 @@ class GatewayRunner:
                 _platform_name, source.chat_id or "unknown",
                 _response_time, _api_calls, _resp_len,
             )
+
 
             # Surface error details when the agent failed silently (final_response=None)
             if not response and agent_result.get("failed"):
@@ -4115,6 +4339,261 @@ class GatewayRunner:
             return raw.guild.id
         return None
 
+    async def _handle_escalation_command(self, event: MessageEvent, action: str) -> str:
+        """Handle /send, /edit, /skip for owner mention escalations.
+
+        Usage:
+          /send <chat_id>                     — post the draft as-is
+          /edit <chat_id> <instructions>      — revise the draft and post
+          /skip <chat_id>                     — drop the escalation
+        """
+        source = event.source
+        if not _is_owner_dm(source, self.config):
+            return "⛔ Only the bot owner can respond to escalations."
+
+        args = event.get_command_args().strip()
+        parts = args.split(None, 1)
+        if not parts:
+            # If only one escalation pending, use that
+            if len(self._pending_escalations) == 1:
+                chat_id = next(iter(self._pending_escalations))
+            else:
+                return "Usage: `/{} <chat_id>`".format(action)
+        else:
+            chat_id = parts[0]
+
+        escalation = self._pending_escalations.get(chat_id)
+        if not escalation:
+            return f"No pending escalation for chat `{chat_id}`."
+
+        adapter = self.adapters.get(escalation["platform"])
+        if not adapter:
+            return "Platform adapter not available."
+
+        chat_name = escalation.get("chat_name", chat_id)
+        draft = escalation.get("draft", "")
+
+        if action == "skip":
+            del self._pending_escalations[chat_id]
+            return f"✅ Skipped — no response sent to {chat_name}."
+
+        if action == "send":
+            await adapter.send(chat_id, draft)
+            del self._pending_escalations[chat_id]
+            return f"✅ Response sent to {chat_name}."
+
+        if action == "edit":
+            instructions = parts[1] if len(parts) > 1 else ""
+            if not instructions:
+                return "Usage: `/edit <chat_id> <rewrite instructions>`"
+
+            # Re-run agent with edit instructions to revise the draft
+            _saved_scope = os.environ.pop("HERMES_MEMORY_SCOPE", None)
+            try:
+                edit_result = await self._run_agent(
+                    message=(
+                        f"Here is a draft response about James for a group chat:\n\n"
+                        f"\"{draft}\"\n\n"
+                        f"The owner wants these changes: {instructions}\n\n"
+                        f"Rewrite the response incorporating those changes. "
+                        f"Keep it in third person about James. "
+                        f"Output ONLY the revised response text."
+                    ),
+                    context_prompt="",
+                    history=[],
+                    source=source,
+                    session_id=f"edit_{chat_id}",
+                    session_key=f"edit:{chat_id}",
+                )
+            finally:
+                if _saved_scope:
+                    os.environ["HERMES_MEMORY_SCOPE"] = _saved_scope
+
+            revised = (edit_result.get("final_response") or draft).strip()
+            await adapter.send(chat_id, revised)
+            del self._pending_escalations[chat_id]
+            return f"✅ Revised response sent to {chat_name}:\n\n> {revised}"
+
+        return "Unknown escalation action."
+
+    async def _handle_permissions_command(self, event: MessageEvent, action: str) -> str:
+        """Handle /allow, /revoke, and /permissions commands.
+
+        Only the owner (home channel DM) can manage permissions.
+
+        Usage:
+          /allow <chat_id> all              — grant full toolset
+          /allow <chat_id> web,skills,file  — grant specific toolsets
+          /revoke <chat_id>                 — revoke all tools
+          /revoke <chat_id> terminal,file   — revoke specific toolsets
+          /permissions list                 — list all known chats & their tools
+          /permissions show <chat_id>       — show tools for a specific chat
+        """
+        source = event.source
+        if not _is_owner_dm(source, self.config):
+            return "⛔ Only the bot owner can manage chat permissions."
+
+        from gateway.permissions import get_chat_toolsets, set_chat_toolsets, list_chats
+        from hermes_cli.tools_config import _get_platform_tools
+
+        args = event.get_command_args().strip()
+        platform_name = source.platform.value if source.platform else "unknown"
+
+        if action == "permissions":
+            parts = args.split(None, 1)
+            sub = parts[0].lower() if parts else "list"
+
+            if sub == "list":
+                chats = list_chats(platform_name)
+                if not chats:
+                    return "No chats with permissions entries yet."
+                lines = ["**Chat Permissions:**\n"]
+                for key, entry in chats.items():
+                    _cid = key.split(":", 1)[-1]
+                    _name = entry.get("chat_name") or _cid
+                    _type = entry.get("chat_type", "?")
+                    _tools = entry.get("toolsets", [])
+                    _tools_str = ", ".join(_tools) if _tools else "(none)"
+                    _repos = entry.get("repos", [])
+                    _repos_str = ", ".join(_repos) if _repos else "(none)"
+                    lines.append(f"• **{_name}** ({_type}) `{_cid}`\n  Tools: {_tools_str}\n  Repos: {_repos_str}")
+                return "\n".join(lines)
+
+            if sub == "show" and len(parts) > 1:
+                chat_id = parts[1].strip()
+                tools = get_chat_toolsets(platform_name, chat_id)
+                if tools is None:
+                    return f"No permissions entry for chat `{chat_id}`."
+                tools_str = ", ".join(tools) if tools else "(none)"
+                return f"Tools for `{chat_id}`: {tools_str}"
+
+            return (
+                "Usage:\n"
+                "`/permissions list` — list all chats\n"
+                "`/permissions show <chat_id>` — show tools for a chat"
+            )
+
+        # /allow <chat_id> <toolsets>
+        if action == "allow":
+            parts = args.split(None, 1)
+            if len(parts) < 2:
+                return (
+                    "Usage: `/allow <chat_id> <toolsets>`\n"
+                    "Examples:\n"
+                    "  `/allow 12345 all` — full access\n"
+                    "  `/allow 12345 web,skills,vision` — selective"
+                )
+            chat_id = parts[0]
+            toolsets_arg = parts[1].strip().lower()
+
+            if toolsets_arg == "all":
+                # Grant the full platform toolset
+                user_config = _load_gateway_config()
+                platform_key = _platform_config_key(source.platform)
+                all_tools = sorted(_get_platform_tools(user_config, platform_key))
+                set_chat_toolsets(platform_name, chat_id, all_tools)
+                return f"✅ Granted **all tools** to chat `{chat_id}`:\n{', '.join(all_tools)}"
+            else:
+                new_tools = [t.strip() for t in toolsets_arg.split(",") if t.strip()]
+                existing = get_chat_toolsets(platform_name, chat_id) or []
+                merged = sorted(set(existing) | set(new_tools))
+                set_chat_toolsets(platform_name, chat_id, merged)
+                return f"✅ Tools for chat `{chat_id}` updated: {', '.join(merged)}"
+
+        # /revoke <chat_id> [toolsets]
+        if action == "revoke":
+            parts = args.split(None, 1)
+            if not parts:
+                return "Usage: `/revoke <chat_id> [toolsets]`\nOmit toolsets to revoke all."
+            chat_id = parts[0]
+            if len(parts) == 1:
+                set_chat_toolsets(platform_name, chat_id, [])
+                return f"✅ Revoked all tools from chat `{chat_id}`."
+            else:
+                to_remove = {t.strip() for t in parts[1].split(",") if t.strip()}
+                existing = get_chat_toolsets(platform_name, chat_id) or []
+                remaining = sorted(set(existing) - to_remove)
+                set_chat_toolsets(platform_name, chat_id, remaining)
+                removed_str = ", ".join(sorted(to_remove))
+                remaining_str = ", ".join(remaining) if remaining else "(none)"
+                return f"✅ Revoked {removed_str} from `{chat_id}`.\nRemaining: {remaining_str}"
+
+        return "Unknown permissions action."
+
+    async def _handle_repos_command(self, event: MessageEvent) -> str:
+        """Handle /repos — manage allowed repos for a chat.
+
+        Usage:
+          /repos <chat_id> owner/repo1 owner/repo2  — set repos (clones them)
+          /repos <chat_id> +owner/repo               — add a repo
+          /repos <chat_id> -owner/repo               — remove a repo
+          /repos <chat_id>                            — show current repos
+        """
+        source = event.source
+        if not _is_owner_dm(source, self.config):
+            return "⛔ Only the bot owner can manage chat repos."
+
+        from gateway.permissions import add_chat_repos, remove_chat_repos, get_chat_repos, get_chat_sandbox
+
+        args = event.get_command_args().strip()
+        parts = args.split()
+        if not parts:
+            return (
+                "Usage:\n"
+                "`/repos <chat_id> owner/repo1 owner/repo2` — set repos\n"
+                "`/repos <chat_id> +owner/repo` — add a repo\n"
+                "`/repos <chat_id> -owner/repo` — remove a repo\n"
+                "`/repos <chat_id>` — show current repos"
+            )
+
+        chat_id = parts[0]
+        repo_args = parts[1:]
+        platform_name = source.platform.value if source.platform else "unknown"
+
+        # Show current repos
+        if not repo_args:
+            repos = get_chat_repos(platform_name, chat_id)
+            sandbox = get_chat_sandbox(platform_name, chat_id)
+            if not repos:
+                return f"No repos configured for chat `{chat_id}`."
+            repos_str = "\n".join(f"  • `{r}`" for r in repos)
+            sandbox_str = f"\nSandbox: `{sandbox}`" if sandbox else ""
+            return f"**Repos for `{chat_id}`:**\n{repos_str}{sandbox_str}"
+
+        # Parse +add / -remove / set
+        to_add = []
+        to_remove = []
+        for arg in repo_args:
+            if arg.startswith("+"):
+                to_add.append(arg[1:])
+            elif arg.startswith("-"):
+                to_remove.append(arg[1:])
+            else:
+                to_add.append(arg)
+
+        lines = []
+
+        if to_remove:
+            result = remove_chat_repos(platform_name, chat_id, to_remove)
+            if result["removed"]:
+                lines.append(f"Removed: {', '.join(result['removed'])}")
+            if result["not_found"]:
+                lines.append(f"Not found: {', '.join(result['not_found'])}")
+
+        if to_add:
+            result = add_chat_repos(platform_name, chat_id, to_add)
+            if result["added"]:
+                lines.append(f"✅ Added: {', '.join(result['added'])}")
+            if result["already_present"]:
+                lines.append(f"Already present: {', '.join(result['already_present'])}")
+            if result["errors"]:
+                lines.append(f"❌ Errors:\n" + "\n".join(f"  • {e}" for e in result["errors"]))
+            lines.append(f"Sandbox: `{result['sandbox_root']}`")
+
+        repos = get_chat_repos(platform_name, chat_id)
+        lines.append(f"\nCurrent repos: {', '.join(repos) if repos else '(none)'}")
+        return "\n".join(lines)
+
     async def _handle_voice_command(self, event: MessageEvent) -> str:
         """Handle /voice [on|off|tts|channel|leave|status] command."""
         args = event.get_command_args().strip().lower()
@@ -4627,7 +5106,20 @@ class GatewayRunner:
             platform_key = _platform_config_key(source.platform)
 
             from hermes_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            if _is_owner_dm(source, self.config):
+                enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+            else:
+                from gateway.permissions import get_chat_toolsets
+                _bg_platform = source.platform.value if source.platform else "unknown"
+                granted = get_chat_toolsets(_bg_platform, source.chat_id)
+                if granted:
+                    enabled_toolsets = sorted(granted)
+                else:
+                    enabled_toolsets = []
+                    logger.info(
+                        "Non-owner chat %s (type=%s) — tools disabled for background task",
+                        source.chat_id, source.chat_type,
+                    )
 
             # Apply per-chat toolset overrides (deny-by-default when configured)
             enabled_toolsets = _apply_chat_toolset_override(
@@ -6011,6 +6503,28 @@ class GatewayRunner:
         if context.source.thread_id:
             os.environ["HERMES_SESSION_THREAD_ID"] = str(context.source.thread_id)
 
+        # ── Memory scoping ─────────────────────────────────────────────
+        # Non-owner chats get isolated memory under memories/chats/{scope}/
+        # Owner DM uses the global memories/ directory (no scope set).
+        if _is_owner_dm(context.source, self.config):
+            os.environ.pop("HERMES_MEMORY_SCOPE", None)
+            os.environ.pop("HERMES_SANDBOX_ROOT", None)
+            os.environ.pop("HERMES_ALLOWED_REPOS", None)
+        else:
+            os.environ["HERMES_MEMORY_SCOPE"] = f"{platform_value}:{chat_id}"
+            # ── Sandbox scoping ────────────────────────────────────────
+            from gateway.permissions import get_chat_sandbox, get_chat_repos
+            sandbox = get_chat_sandbox(platform_value, chat_id)
+            repos = get_chat_repos(platform_value, chat_id)
+            if sandbox:
+                os.environ["HERMES_SANDBOX_ROOT"] = sandbox
+            else:
+                os.environ.pop("HERMES_SANDBOX_ROOT", None)
+            if repos:
+                os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
+            else:
+                os.environ.pop("HERMES_ALLOWED_REPOS", None)
+
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup
         try:
@@ -6043,7 +6557,7 @@ class GatewayRunner:
 
     def _clear_session_env(self) -> None:
         """Clear session environment variables and per-chat secrets."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID"]:
+        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS"]:
             if var in os.environ:
                 del os.environ[var]
 
@@ -6427,7 +6941,24 @@ class GatewayRunner:
         platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        if _is_owner_dm(source, self.config):
+            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+        else:
+            from gateway.permissions import get_chat_toolsets
+            platform_name = source.platform.value if source.platform else "unknown"
+            granted = get_chat_toolsets(platform_name, source.chat_id)
+            if granted:
+                enabled_toolsets = sorted(granted)
+                logger.info(
+                    "Non-owner chat %s — granted toolsets: %s",
+                    source.chat_id, enabled_toolsets,
+                )
+            else:
+                enabled_toolsets = []
+                logger.info(
+                    "Non-owner chat %s (type=%s) — tools disabled",
+                    source.chat_id, source.chat_type,
+                )
 
         # Apply per-chat toolset overrides (deny-by-default when configured)
         enabled_toolsets = _apply_chat_toolset_override(

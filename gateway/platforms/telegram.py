@@ -1932,7 +1932,7 @@ class TelegramAdapter(BasePlatformAdapter):
             if isinstance(configured, str):
                 return configured.lower() in ("true", "1", "yes", "on")
             return bool(configured)
-        return os.getenv("TELEGRAM_REQUIRE_MENTION", "false").lower() in ("true", "1", "yes", "on")
+        return os.getenv("TELEGRAM_REQUIRE_MENTION", "true").lower() in ("true", "1", "yes", "on")
 
     def _telegram_free_response_chats(self) -> set[str]:
         raw = self.config.extra.get("free_response_chats")
@@ -2022,6 +2022,17 @@ class TelegramAdapter(BasePlatformAdapter):
                         return True
         return False
 
+    def _message_mentions_owner(self, message: Message) -> bool:
+        """Check if the message mentions the bot owner by name."""
+        import os as _os
+        owner_name = _os.environ.get("HERMES_OWNER_NAME", "").strip().lower()
+        if not owner_name:
+            return False
+        for candidate in (getattr(message, "text", None), getattr(message, "caption", None)):
+            if candidate and owner_name in candidate.lower():
+                return True
+        return False
+
     def _message_matches_mention_patterns(self, message: Message) -> bool:
         if not self._mention_patterns:
             return False
@@ -2062,6 +2073,8 @@ class TelegramAdapter(BasePlatformAdapter):
         if self._is_reply_to_bot(message):
             return True
         if self._message_mentions_bot(message):
+            return True
+        if self._message_mentions_owner(message):
             return True
         return self._message_matches_mention_patterns(message)
 

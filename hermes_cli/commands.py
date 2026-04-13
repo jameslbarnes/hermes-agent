@@ -139,6 +139,24 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
                gateway_only=True),
 
+    # Permissions
+    CommandDef("allow", "Grant tools to a chat", "Permissions",
+               gateway_only=True, args_hint="<chat_id> <toolsets|all>"),
+    CommandDef("revoke", "Revoke tools from a chat", "Permissions",
+               gateway_only=True, args_hint="<chat_id> [toolsets]"),
+    CommandDef("permissions", "List/show chat permissions", "Permissions",
+               gateway_only=True, args_hint="[list|show <chat_id>]"),
+    CommandDef("repos", "Manage allowed repos for a chat", "Permissions",
+               gateway_only=True, args_hint="<chat_id> [+repo] [-repo]"),
+
+    # Escalation (owner mention draft/approve)
+    CommandDef("send", "Send a pending draft response to a group chat", "Escalation",
+               gateway_only=True, args_hint="<chat_id>"),
+    CommandDef("edit", "Revise and send a pending draft response", "Escalation",
+               gateway_only=True, args_hint="<chat_id> <instructions>"),
+    CommandDef("skip", "Skip a pending escalation (don't respond)", "Escalation",
+               gateway_only=True, args_hint="<chat_id>"),
+
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",
                cli_only=True, aliases=("exit", "q")),

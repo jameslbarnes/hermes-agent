@@ -244,6 +244,42 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
         return tool_error(f"Failed to list recent sessions: {e}", success=False)
 
 
+def _get_scoped_session_ids() -> set[str] | None:
+    """If HERMES_MEMORY_SCOPE is set, return the set of session_ids belonging
+    to that chat scope by reading the session store.  Returns None if unscoped
+    (owner DM / CLI) — meaning search everything."""
+    import os
+    scope = os.environ.get("HERMES_MEMORY_SCOPE", "").strip()
+    if not scope:
+        return None
+    try:
+        from hermes_constants import get_hermes_home
+        import json as _json
+        sessions_file = get_hermes_home() / "sessions" / "sessions.json"
+        if not sessions_file.exists():
+            return set()
+        with open(sessions_file, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        # Session keys for this chat contain the chat_id.
+        # scope is "platform:chat_id", session keys look like
+        # "agent:main:telegram:group:-100ETHEREA:user123"
+        # We match on the chat_id portion being present in the key.
+        parts = scope.split(":", 1)
+        if len(parts) != 2:
+            return set()
+        platform, chat_id = parts
+        matching = set()
+        for key, entry in data.items():
+            if platform in key and chat_id in key:
+                sid = entry.get("session_id") if isinstance(entry, dict) else None
+                if sid:
+                    matching.add(sid)
+        return matching
+    except Exception:
+        logging.debug("Failed to load scoped session IDs", exc_info=True)
+        return None
+
+
 def session_search(
     query: str,
     role_filter: str = None,
@@ -261,6 +297,10 @@ def session_search(
         return tool_error("Session database not available.", success=False)
 
     limit = min(limit, 5)  # Cap at 5 sessions to avoid excessive LLM calls
+
+    # Chat-scoped search: if running in a non-owner chat, only search
+    # sessions belonging to that chat.
+    scoped_ids = _get_scoped_session_ids()
 
     # Recent sessions mode: when query is empty, return metadata for recent sessions.
     # No LLM calls — just DB queries for titles, previews, timestamps.
@@ -331,6 +371,9 @@ def session_search(
         for result in raw_results:
             raw_sid = result["session_id"]
             resolved_sid = _resolve_to_parent(raw_sid)
+            # Chat scope filter: only include sessions from this chat
+            if scoped_ids is not None and resolved_sid not in scoped_ids and raw_sid not in scoped_ids:
+                continue
             # Skip the current session lineage — the agent already has that
             # context, even if older turns live in parent fragments.
             if current_lineage_root and resolved_sid == current_lineage_root:

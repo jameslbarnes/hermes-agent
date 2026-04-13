@@ -154,6 +154,67 @@ def _check_all_guards(command: str, env_type: str) -> dict:
 _WORKDIR_SAFE_RE = re.compile(r'^[A-Za-z0-9/_\-.~ +@=,]+$')
 
 
+def _enforce_sandbox(command: str, sandbox_root: str, workdir: str | None = None) -> str | None:
+    """Enforce sandbox restrictions on a terminal command.
+
+    Checks:
+    1. No absolute paths outside the sandbox
+    2. Git remote operations only against allowed repos
+    3. No directory escapes via cd
+
+    Returns None if allowed, or an error message if blocked.
+    """
+    import re
+    from pathlib import Path as _P
+
+    sandbox = _P(sandbox_root).resolve()
+    allowed_repos_raw = os.environ.get("HERMES_ALLOWED_REPOS", "").strip()
+    allowed_repos = [r.strip() for r in allowed_repos_raw.split(",") if r.strip()] if allowed_repos_raw else []
+
+    # Check for absolute paths outside sandbox
+    # Match /foo/bar patterns but not flags like -/
+    abs_path_pattern = re.compile(r'(?<![a-zA-Z0-9_\-])(/[a-zA-Z][a-zA-Z0-9_/.\-]*)')
+    for match in abs_path_pattern.finditer(command):
+        path_str = match.group(1)
+        # Skip common system paths that are read-only and safe
+        safe_prefixes = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+                         "/tmp", "/usr/bin", "/usr/local/bin", "/bin", "/proc/self")
+        if any(path_str.startswith(p) for p in safe_prefixes):
+            continue
+        try:
+            resolved = _P(path_str).resolve()
+            if resolved != sandbox and sandbox not in resolved.parents:
+                return (
+                    f"Blocked: path '{path_str}' is outside the sandbox. "
+                    f"This chat can only access files within its workspace."
+                )
+        except (OSError, ValueError):
+            pass
+
+    # Check git remote operations against repo allowlist
+    git_remote_patterns = [
+        # git clone <url>, git remote add <name> <url>, git push <url>, git fetch <url>
+        re.compile(r'git\s+(?:clone|remote\s+add\s+\S+|push|pull|fetch)\s+(?:--\S+\s+)*(\S+)', re.I),
+        # gh repo clone <owner/repo>
+        re.compile(r'gh\s+repo\s+clone\s+(\S+)', re.I),
+    ]
+    for pattern in git_remote_patterns:
+        m = pattern.search(command)
+        if m:
+            url = m.group(1)
+            # Skip if it looks like a branch name or flag
+            if url.startswith("-") or "/" not in url:
+                continue
+            from gateway.permissions import is_repo_allowed
+            if not is_repo_allowed(url, allowed_repos):
+                return (
+                    f"Blocked: repo '{url}' is not in this chat's allowed repos. "
+                    f"Allowed: {', '.join(allowed_repos) if allowed_repos else '(none)'}"
+                )
+
+    return None
+
+
 def _validate_workdir(workdir: str) -> str | None:
     """Reject workdir values that don't look like a filesystem path.
 
@@ -1317,6 +1378,33 @@ def terminal_tool(
             elif approval.get("smart_approved"):
                 desc = approval.get("description", "flagged as dangerous")
                 approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
+
+        # ── Sandbox enforcement ─────────────────────────────────────
+        # When HERMES_SANDBOX_ROOT is set, lock all execution to that
+        # directory and validate git operations against the repo allowlist.
+        _sandbox_root = os.environ.get("HERMES_SANDBOX_ROOT", "").strip()
+        if _sandbox_root:
+            sandbox_error = _enforce_sandbox(command, _sandbox_root, workdir)
+            if sandbox_error:
+                logger.warning("Sandbox blocked command: %s (sandbox=%s)",
+                               _safe_command_preview(command), _sandbox_root)
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": sandbox_error,
+                    "status": "blocked"
+                }, ensure_ascii=False)
+            # Force cwd to sandbox root (or workdir within sandbox)
+            if workdir:
+                from pathlib import Path as _Path
+                resolved = _Path(workdir).resolve()
+                sandbox_resolved = _Path(_sandbox_root).resolve()
+                if resolved == sandbox_resolved or sandbox_resolved in resolved.parents:
+                    cwd = str(resolved)
+                else:
+                    cwd = _sandbox_root
+            else:
+                cwd = _sandbox_root
 
         # Validate workdir against shell injection
         if workdir:

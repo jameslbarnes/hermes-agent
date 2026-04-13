@@ -41,7 +41,15 @@ logger = logging.getLogger(__name__)
 # constant was cached at import time and could go stale if a profile switch
 # happened after the first import.
 def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory."""
+    """Return the memory directory, scoped to the current chat if set.
+
+    When HERMES_MEMORY_SCOPE is set (e.g. "telegram:-100123456"), memory
+    is isolated under memories/chats/{scope}/.  Otherwise returns the
+    global memories/ directory (owner DM / CLI).
+    """
+    scope = os.environ.get("HERMES_MEMORY_SCOPE", "").strip()
+    if scope:
+        return get_hermes_home() / "memories" / "chats" / scope
     return get_hermes_home() / "memories"
 
 # Backward-compatible alias — gateway/run.py imports this at runtime inside
