@@ -571,6 +571,19 @@ DEFAULT_CONFIG = {
     # Secrets are set as env vars at session start and cleared after.
     "chat_secrets": {},
 
+    # Per-chat toolset overrides — restrict which tools are available per chat.
+    # Keys are "platform:chat_id" strings, values are lists of toolset names.
+    # Use ["*"] to grant all platform tools, or [] for no tools (chat only).
+    # Supports "platform:*" wildcard for default per-platform.
+    # When this section is non-empty, unlisted chats get NO tools.
+    # When this section is empty/missing, all chats get default platform tools.
+    # Example:
+    #   chat_toolsets:
+    #     "telegram:123456789": ["*"]           # full access
+    #     "telegram:-1001234567890": ["web", "vision"]  # limited
+    #     "telegram:*": []                       # all other telegram chats: no tools
+    "chat_toolsets": {},
+
     # Logging — controls file logging to ~/.hermes/logs/.
     # agent.log captures INFO+ (all agent activity); errors.log captures WARNING+.
     "logging": {
@@ -1408,7 +1421,7 @@ _KNOWN_ROOT_KEYS = {
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "memory", "gateway",
-    "chat_secrets",
+    "chat_secrets", "chat_toolsets",
 }
 
 # Valid fields inside a custom_providers list entry

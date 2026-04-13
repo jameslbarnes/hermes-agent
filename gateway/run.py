@@ -417,6 +417,60 @@ def _load_gateway_config() -> dict:
     return {}
 
 
+def _apply_chat_toolset_override(
+    config: dict,
+    platform: "Platform",
+    chat_id: str,
+    platform_toolsets: list[str],
+) -> list[str]:
+    """Apply per-chat toolset overrides from the ``chat_toolsets`` config.
+
+    When ``chat_toolsets`` is non-empty, only listed chats get tools.
+    Unlisted chats get an empty toolset (can still chat, no tool use).
+
+    Matching order (first match wins):
+    1. ``"platform:chat_id"``  (exact match)
+    2. ``"platform:*"``        (wildcard — all chats on that platform)
+
+    A toolset list of ``["*"]`` means "use the full platform defaults".
+    An empty list ``[]`` means "no tools".
+    Any other list is used directly as the enabled toolset names.
+
+    Returns the (possibly overridden) toolset list.
+    """
+    chat_toolsets_map = config.get("chat_toolsets") or {}
+    if not chat_toolsets_map:
+        # Feature not configured — pass through unchanged
+        return platform_toolsets
+
+    platform_value = platform.value if hasattr(platform, "value") else str(platform)
+    # LOCAL platform uses "cli" key everywhere else, but chat_toolsets uses
+    # the actual platform value for consistency with chat_secrets.
+    chat_key = f"{platform_value}:{chat_id}"
+    wildcard_key = f"{platform_value}:*"
+
+    # Find the matching override
+    if chat_key in chat_toolsets_map:
+        override = chat_toolsets_map[chat_key]
+    elif wildcard_key in chat_toolsets_map:
+        override = chat_toolsets_map[wildcard_key]
+    else:
+        # Chat not listed — deny all tools
+        logger.debug("chat_toolsets: no match for %s, denying all tools", chat_key)
+        return []
+
+    if not isinstance(override, list):
+        logger.warning("chat_toolsets: value for %s is not a list, denying all tools", chat_key)
+        return []
+
+    if override == ["*"]:
+        # Wildcard — use full platform defaults
+        return platform_toolsets
+
+    # Return the explicit toolset list
+    return sorted(override)
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -4575,6 +4629,11 @@ class GatewayRunner:
             from hermes_cli.tools_config import _get_platform_tools
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
 
+            # Apply per-chat toolset overrides (deny-by-default when configured)
+            enabled_toolsets = _apply_chat_toolset_override(
+                user_config, source.platform, source.chat_id, enabled_toolsets,
+            )
+
             pr = self._provider_routing
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
             reasoning_config = self._load_reasoning_config()
@@ -6369,6 +6428,11 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+
+        # Apply per-chat toolset overrides (deny-by-default when configured)
+        enabled_toolsets = _apply_chat_toolset_override(
+            user_config, source.platform, source.chat_id, enabled_toolsets,
+        )
 
         # Apply tool preview length config (0 = no limit)
         try:
