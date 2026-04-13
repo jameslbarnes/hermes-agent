@@ -2582,6 +2582,30 @@ class GatewayRunner:
             group_digest = _build_group_memory_digest()
             if group_digest:
                 context_prompt += "\n\n" + group_digest
+        else:
+            # ── Workspace context for non-owner chats ─────────────────
+            # Tell the agent about its sandbox, repos, and capabilities.
+            sandbox_root = os.environ.get("HERMES_SANDBOX_ROOT", "")
+            allowed_repos = os.environ.get("HERMES_ALLOWED_REPOS", "")
+            has_github_token = bool(os.environ.get("GITHUB_TOKEN", ""))
+            if sandbox_root:
+                workspace_lines = [
+                    "\n## Workspace",
+                    f"Your working directory is `{sandbox_root}`. All file and terminal operations are restricted to this directory.",
+                ]
+                if allowed_repos:
+                    repos_list = [r.strip() for r in allowed_repos.split(",") if r.strip()]
+                    workspace_lines.append(f"**Allowed repos:** {', '.join(repos_list)}")
+                if has_github_token:
+                    workspace_lines.append(
+                        "**GitHub access:** You have a `GITHUB_TOKEN` environment variable set. "
+                        "Use it with curl to access the GitHub API. For example:\n"
+                        "```\ncurl -s -H \"Authorization: token $GITHUB_TOKEN\" "
+                        "-H \"Content-Type: application/json\" "
+                        "-d '{\"title\": \"...\", \"body\": \"...\"}' "
+                        "https://api.github.com/repos/OWNER/REPO/issues\n```"
+                    )
+                context_prompt += "\n".join(workspace_lines)
 
         # If the previous session expired and was auto-reset, prepend a notice
         # so the agent knows this is a fresh conversation (not an intentional /reset).
