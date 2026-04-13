@@ -483,6 +483,21 @@ def _build_group_memory_digest(max_chars_per_group: int = 800) -> str:
         return ""
 
 
+def _is_owner_user(source: "SessionSource", gateway_config) -> bool:
+    """Check if the message is from the owner, regardless of which chat.
+
+    Compares the sender's user_id against the home channel chat_id
+    (which is the owner's Telegram user ID for DMs).
+    Used for command authorization — the owner can run /allow, /repos, etc.
+    from any chat.
+    """
+    home = gateway_config.get_home_channel(source.platform)
+    if home is None:
+        return False
+    user_id = source.user_id or source.chat_id
+    return str(user_id) == str(home.chat_id)
+
+
 def _is_owner_dm(source: "SessionSource", gateway_config) -> bool:
     """Check if the message is from the owner's 1:1 DM (home channel).
 
@@ -4348,7 +4363,7 @@ class GatewayRunner:
           /skip <chat_id>                     — drop the escalation
         """
         source = event.source
-        if not _is_owner_dm(source, self.config):
+        if not _is_owner_user(source, self.config):
             return "⛔ Only the bot owner can respond to escalations."
 
         args = event.get_command_args().strip()
@@ -4430,7 +4445,7 @@ class GatewayRunner:
           /permissions show <chat_id>       — show tools for a specific chat
         """
         source = event.source
-        if not _is_owner_dm(source, self.config):
+        if not _is_owner_user(source, self.config):
             return "⛔ Only the bot owner can manage chat permissions."
 
         from gateway.permissions import get_chat_toolsets, set_chat_toolsets, list_chats
@@ -4476,15 +4491,23 @@ class GatewayRunner:
         # /allow <chat_id> <toolsets>
         if action == "allow":
             parts = args.split(None, 1)
-            if len(parts) < 2:
+            if len(parts) < 1:
                 return (
-                    "Usage: `/allow <chat_id> <toolsets>`\n"
+                    "Usage: `/allow <toolsets>` (in a group) or `/allow <chat_id> <toolsets>`\n"
                     "Examples:\n"
-                    "  `/allow 12345 all` — full access\n"
-                    "  `/allow 12345 web,skills,vision` — selective"
+                    "  `/allow all` — full access for this chat\n"
+                    "  `/allow web,skills,vision` — selective\n"
+                    "  `/allow -100OTHER all` — grant to a different chat"
                 )
-            chat_id = parts[0]
-            toolsets_arg = parts[1].strip().lower()
+            # If first arg looks like a toolset (not a chat ID), use current chat
+            if len(parts) == 1 or (not parts[0].lstrip("-").isdigit() and "/" not in parts[0]):
+                chat_id = source.chat_id
+                toolsets_arg = args.strip().lower()
+            else:
+                if len(parts) < 2:
+                    return "Usage: `/allow <chat_id> <toolsets>`"
+                chat_id = parts[0]
+                toolsets_arg = parts[1].strip().lower()
 
             if toolsets_arg == "all":
                 # Grant the full platform toolset
@@ -4530,25 +4553,40 @@ class GatewayRunner:
           /repos <chat_id>                            — show current repos
         """
         source = event.source
-        if not _is_owner_dm(source, self.config):
+        if not _is_owner_user(source, self.config):
             return "⛔ Only the bot owner can manage chat repos."
 
         from gateway.permissions import add_chat_repos, remove_chat_repos, get_chat_repos, get_chat_sandbox
 
         args = event.get_command_args().strip()
         parts = args.split()
+        platform_name = source.platform.value if source.platform else "unknown"
+
         if not parts:
+            # No args — show repos for current chat
+            if source.chat_type != "dm":
+                chat_id = source.chat_id
+                repos = get_chat_repos(platform_name, chat_id)
+                sandbox = get_chat_sandbox(platform_name, chat_id)
+                if not repos:
+                    return f"No repos configured for this chat.\nUsage: `/repos owner/repo1 owner/repo2`"
+                repos_str = "\n".join(f"  • `{r}`" for r in repos)
+                sandbox_str = f"\nSandbox: `{sandbox}`" if sandbox else ""
+                return f"**Repos for this chat:**\n{repos_str}{sandbox_str}"
             return (
                 "Usage:\n"
-                "`/repos <chat_id> owner/repo1 owner/repo2` — set repos\n"
-                "`/repos <chat_id> +owner/repo` — add a repo\n"
-                "`/repos <chat_id> -owner/repo` — remove a repo\n"
-                "`/repos <chat_id>` — show current repos"
+                "`/repos owner/repo1 owner/repo2` — set repos (in a group)\n"
+                "`/repos <chat_id> owner/repo1` — set repos for another chat\n"
+                "`/repos` — show repos for this chat"
             )
 
-        chat_id = parts[0]
-        repo_args = parts[1:]
-        platform_name = source.platform.value if source.platform else "unknown"
+        # If first arg looks like a repo (has /) not a chat ID, use current chat
+        if "/" in parts[0] or parts[0].startswith("+") or parts[0].startswith("-"):
+            chat_id = source.chat_id
+            repo_args = parts
+        else:
+            chat_id = parts[0]
+            repo_args = parts[1:]
 
         # Show current repos
         if not repo_args:
@@ -6513,17 +6551,21 @@ class GatewayRunner:
         else:
             os.environ["HERMES_MEMORY_SCOPE"] = f"{platform_value}:{chat_id}"
             # ── Sandbox scoping ────────────────────────────────────────
-            from gateway.permissions import get_chat_sandbox, get_chat_repos
+            from gateway.permissions import get_chat_sandbox, get_chat_repos, WORKSPACES_ROOT
             sandbox = get_chat_sandbox(platform_value, chat_id)
             repos = get_chat_repos(platform_value, chat_id)
             if sandbox:
                 os.environ["HERMES_SANDBOX_ROOT"] = sandbox
             else:
-                os.environ.pop("HERMES_SANDBOX_ROOT", None)
+                # No repos configured — set sandbox to an empty workspace dir
+                # so tools are still sandboxed (can't access owner files).
+                fallback_sandbox = str(WORKSPACES_ROOT / f"{platform_value}:{chat_id}")
+                os.makedirs(fallback_sandbox, exist_ok=True)
+                os.environ["HERMES_SANDBOX_ROOT"] = fallback_sandbox
             if repos:
                 os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
             else:
-                os.environ.pop("HERMES_ALLOWED_REPOS", None)
+                os.environ["HERMES_ALLOWED_REPOS"] = ""
 
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup

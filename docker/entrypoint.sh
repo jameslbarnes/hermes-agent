@@ -33,7 +33,6 @@ fi
 
 # Default to gateway mode for headless deployments (no TTY available)
 if [ $# -eq 0 ]; then
-    exec hermes gateway run
-else
-    exec hermes "$@"
+    set -- gateway run
 fi
+exec hermes "$@" -v

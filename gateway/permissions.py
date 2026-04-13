@@ -164,10 +164,32 @@ def add_chat_repos(platform: str, chat_id: str, repos: List[str]) -> dict:
 
             if not clone_target.exists():
                 try:
+                    # Use GITHUB_BOT_TOKEN for clone if available, so the bot
+                    # operates under its own identity rather than the owner's.
+                    bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
+                    if bot_token:
+                        clone_url = f"https://x-access-token:{bot_token}@github.com/{repo}.git"
+                    else:
+                        clone_url = f"https://github.com/{repo}.git"
                     subprocess.run(
-                        ["git", "clone", f"https://github.com/{repo}.git", str(clone_target)],
+                        ["git", "clone", clone_url, str(clone_target)],
                         check=True, capture_output=True, text=True, timeout=120,
                     )
+                    # Configure git identity in the cloned repo
+                    if bot_token:
+                        subprocess.run(
+                            ["git", "config", "user.name", "hermes-bot"],
+                            cwd=str(clone_target), capture_output=True,
+                        )
+                        subprocess.run(
+                            ["git", "config", "user.email", "hermes-bot@noreply.github.com"],
+                            cwd=str(clone_target), capture_output=True,
+                        )
+                        # Set the remote to use the bot token for push/pull
+                        subprocess.run(
+                            ["git", "remote", "set-url", "origin", clone_url],
+                            cwd=str(clone_target), capture_output=True,
+                        )
                 except subprocess.CalledProcessError as e:
                     errors.append(f"Failed to clone {repo}: {e.stderr.strip()}")
                     continue
