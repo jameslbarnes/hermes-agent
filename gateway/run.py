@@ -6566,6 +6566,10 @@ class GatewayRunner:
                 os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
             else:
                 os.environ["HERMES_ALLOWED_REPOS"] = ""
+            # Expose bot token as GITHUB_TOKEN so git/curl/gh can use it
+            bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
+            if bot_token:
+                os.environ["GITHUB_TOKEN"] = bot_token
 
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup
@@ -6599,7 +6603,7 @@ class GatewayRunner:
 
     def _clear_session_env(self) -> None:
         """Clear session environment variables and per-chat secrets."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS"]:
+        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS", "GITHUB_TOKEN"]:
             if var in os.environ:
                 del os.environ[var]
 
