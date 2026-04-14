@@ -7021,6 +7021,7 @@ class GatewayRunner:
         platform_key = _platform_config_key(source.platform)
 
         from hermes_cli.tools_config import _get_platform_tools
+        _permissions_granted = False
         if _is_owner_dm(source, self.config):
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         else:
@@ -7029,6 +7030,7 @@ class GatewayRunner:
             granted = get_chat_toolsets(platform_name, source.chat_id)
             if granted:
                 enabled_toolsets = sorted(granted)
+                _permissions_granted = True
                 logger.info(
                     "Non-owner chat %s — granted toolsets: %s",
                     source.chat_id, enabled_toolsets,
@@ -7040,10 +7042,13 @@ class GatewayRunner:
                     source.chat_id, source.chat_type,
                 )
 
-        # Apply per-chat toolset overrides (deny-by-default when configured)
-        enabled_toolsets = _apply_chat_toolset_override(
-            user_config, source.platform, source.chat_id, enabled_toolsets,
-        )
+        # Apply per-chat toolset overrides from config.yaml (legacy system).
+        # Skip if our permissions system already granted tools for this chat
+        # — /allow grants take precedence over config.yaml chat_toolsets.
+        if not _permissions_granted:
+            enabled_toolsets = _apply_chat_toolset_override(
+                user_config, source.platform, source.chat_id, enabled_toolsets,
+            )
 
         # Apply tool preview length config (0 = no limit)
         try:
