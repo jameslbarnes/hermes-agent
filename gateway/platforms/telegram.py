@@ -2061,19 +2061,16 @@ class TelegramAdapter(BasePlatformAdapter):
         - the message replies to the bot
         - the bot is @mentioned
         - the text/caption matches a configured regex wake-word pattern
+        - the chat has active listening enabled (tagged for triage)
+
+        Sets ``message._active_listening_triage`` when the message is only
+        accepted because of active listening — the gateway uses this flag
+        to run a cheap triage before engaging the full agent.
         """
         if not self._is_group_chat(message):
             return True
-        chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
-        if chat_id in self._telegram_free_response_chats():
+        if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
             return True
-        # Active listener mode — let the message through for triage
-        try:
-            from gateway.permissions import get_chat_listen_mode
-            if get_chat_listen_mode("telegram", chat_id):
-                return True
-        except Exception:
-            pass
         if not self._telegram_require_mention():
             return True
         if is_command:
@@ -2084,7 +2081,18 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         if self._message_mentions_owner(message):
             return True
-        return self._message_matches_mention_patterns(message)
+        if self._message_matches_mention_patterns(message):
+            return True
+        # Active listening: accept the message but tag it for triage
+        try:
+            from gateway.permissions import get_active_listening
+            chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
+            if get_active_listening("telegram", chat_id):
+                message._active_listening_triage = True
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming text messages.
@@ -2683,7 +2691,7 @@ class TelegramAdapter(BasePlatformAdapter):
             reply_to_id = str(message.reply_to_message.message_id)
             reply_to_text = message.reply_to_message.text or message.reply_to_message.caption or None
 
-        return MessageEvent(
+        event = MessageEvent(
             text=message.text or "",
             message_type=msg_type,
             source=source,
@@ -2694,6 +2702,10 @@ class TelegramAdapter(BasePlatformAdapter):
             auto_skill=topic_skill,
             timestamp=message.date,
         )
+        # Propagate active listening flag from _should_process_message
+        if getattr(message, "_active_listening_triage", False):
+            event._active_listening_triage = True
+        return event
 
     # ── Message reactions (processing lifecycle) ──────────────────────────
 

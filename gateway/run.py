@@ -404,6 +404,51 @@ def _platform_config_key(platform: "Platform") -> str:
     return "cli" if platform == Platform.LOCAL else platform.value
 
 
+async def _triage_message(message: str, chat_name: str, recent_context: str = "") -> bool:
+    """Decide if the agent should engage with a group message.
+
+    Uses a cheap/fast model (Gemini Flash) for a single yes/no decision.
+    Returns True if the agent should respond, False to stay silent.
+    """
+    try:
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+        prompt = (
+            f"You are monitoring a group chat called '{chat_name}'. "
+            "Your job is to decide whether an AI assistant should engage with this message. "
+            "The assistant has access to tools (terminal, file editing, GitHub API) and knowledge about the group's projects.\n\n"
+            "Respond with ONLY 'yes' or 'no'.\n\n"
+            "Say 'yes' if:\n"
+            "- There's something actionable (create an issue, check status, look something up)\n"
+            "- Someone is asking a question the assistant could help with\n"
+            "- The conversation would benefit from the assistant's context or tools\n"
+            "- Someone is making a decision where additional information would help\n\n"
+            "Say 'no' if:\n"
+            "- It's casual chat, greetings, or social conversation\n"
+            "- People are talking to each other and don't need input\n"
+            "- The message is very short with no clear ask\n"
+            "- Responding would be intrusive or annoying\n"
+        )
+        if recent_context:
+            prompt += f"\nRecent conversation context:\n{recent_context}\n"
+        prompt += f"\nNew message: {message}"
+
+        response = await async_call_llm(
+            task="triage",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Should the assistant engage? Answer only 'yes' or 'no'."},
+            ],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        content = (extract_content_or_reasoning(response) or "").strip().lower()
+        return content.startswith("yes")
+    except Exception as e:
+        logger.debug("Triage failed, defaulting to pass: %s", e)
+        return False
+
+
 def _detect_owner_mention(text: str) -> bool:
     """Check if a message mentions or asks for the owner.
 
@@ -3235,36 +3280,28 @@ class GatewayRunner:
                     )
                     return
 
-            # ── Active listener triage ─────────────────────────────────
-            # For listen-mode chats where the bot wasn't directly mentioned,
-            # run a cheap triage to decide whether to respond or stay quiet.
-            if not _is_owner_dm(source, self.config):
-                from gateway.permissions import get_chat_listen_mode
-                platform_name = source.platform.value if source.platform else "unknown"
-                # Check if the bot or owner was directly addressed
-                _bot_username = ""
-                adapter = self.adapters.get(source.platform)
-                if adapter and hasattr(adapter, "_bot") and adapter._bot:
-                    _bot_username = (getattr(adapter._bot, "username", "") or "").lower()
-                _was_mentioned = (
-                    event.get_command() is not None
-                    or _detect_owner_mention(message_text)
-                    or (_bot_username and f"@{_bot_username}" in message_text.lower())
+            # ── Active listening triage ────────────────────────────
+            # If this chat has active listening enabled and the bot wasn't
+            # explicitly @mentioned, run a cheap triage to decide whether
+            # to engage. This lets the bot monitor conversations and only
+            # chime in when it has something useful to contribute.
+            if (not _is_owner_dm(source, self.config)
+                    and not _detect_owner_mention(message_text)
+                    and getattr(event, "_active_listening_triage", False)):
+                _chat_label = source.chat_name or source.chat_id
+                should_engage = await _triage_message(
+                    message_text, _chat_label,
                 )
-                if get_chat_listen_mode(platform_name, source.chat_id) and not _was_mentioned:
-                    triage_decision = await self._triage_message(
-                        message_text, source, history, context_prompt,
-                    )
-                    if triage_decision == "PASS":
-                        logger.info(
-                            "Triage: PASS for chat %s — staying quiet",
-                            source.chat_id,
-                        )
-                        return
+                if not should_engage:
                     logger.info(
-                        "Triage: %s for chat %s — proceeding",
-                        triage_decision, source.chat_id,
+                        "Triage: PASS for chat %s — '%s'",
+                        source.chat_id, message_text[:80],
                     )
+                    return
+                logger.info(
+                    "Triage: ENGAGE for chat %s — '%s'",
+                    source.chat_id, message_text[:80],
+                )
 
             # Run the agent
             agent_result = await self._run_agent(
@@ -4412,87 +4449,6 @@ class GatewayRunner:
             return raw.guild.id
         return None
 
-    async def _triage_message(
-        self, message: str, source, history: list, context_prompt: str,
-    ) -> str:
-        """Decide whether to respond to a message in a listen-mode chat.
-
-        Uses a cheap/fast model to classify the message as:
-          PASS     — nothing relevant, stay quiet
-          RESPOND  — has something useful to contribute
-          ACT      — should take a concrete action (create issue, look something up, etc.)
-
-        Returns one of: "PASS", "RESPOND", "ACT"
-        """
-        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
-
-        # Build context from recent history (last ~10 messages for context)
-        recent = history[-10:] if len(history) > 10 else history
-        history_text = ""
-        for msg in recent:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(
-                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-                )
-            if content:
-                history_text += f"[{role}]: {content[:200]}\n"
-
-        # Read the group's scoped memory for context
-        group_memory = ""
-        scope = os.environ.get("HERMES_MEMORY_SCOPE", "")
-        if scope:
-            try:
-                from hermes_constants import get_hermes_home
-                mem_file = get_hermes_home() / "memories" / "chats" / scope / "MEMORY.md"
-                if mem_file.exists():
-                    group_memory = mem_file.read_text(encoding="utf-8").strip()[:1500]
-            except Exception:
-                pass
-
-        system_prompt = (
-            "You are a triage system for a group chat assistant. Your job is to decide "
-            "whether the assistant should respond to the latest message.\n\n"
-            "The assistant is a helpful AI that participates in a group chat between collaborators. "
-            "It has access to tools (terminal, file operations, GitHub API). "
-            "It should speak up when it can add value — answering questions, offering context, "
-            "taking action on tasks, or flagging things the team should know.\n\n"
-            "It should stay quiet when the message is casual chatter, greetings, acknowledgments, "
-            "or discussion that doesn't need AI input.\n\n"
-            "Respond with EXACTLY one word: PASS, RESPOND, or ACT\n"
-            "- PASS: Stay quiet. Nothing to add.\n"
-            "- RESPOND: The assistant has something useful to say.\n"
-            "- ACT: The assistant should take a concrete action (create issue, look something up, run a command, etc.)\n"
-        )
-
-        user_prompt = ""
-        if group_memory:
-            user_prompt += f"Group memory/context:\n{group_memory}\n\n"
-        if history_text:
-            user_prompt += f"Recent conversation:\n{history_text}\n\n"
-        user_prompt += f"Latest message: {message}\n\nDecision (one word):"
-
-        try:
-            response = await async_call_llm(
-                task="triage",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.0,
-                max_tokens=10,
-            )
-            content = extract_content_or_reasoning(response)
-            if content:
-                decision = content.strip().upper().split()[0]
-                if decision in ("PASS", "RESPOND", "ACT"):
-                    return decision
-            return "PASS"  # Default to quiet if triage is unclear
-        except Exception as e:
-            logger.warning("Triage failed: %s — defaulting to PASS", e)
-            return "PASS"
-
     async def _handle_escalation_command(self, event: MessageEvent, action: str) -> str:
         """Handle /send, /edit, /skip for owner mention escalations.
 
@@ -4683,34 +4639,43 @@ class GatewayRunner:
         return "Unknown permissions action."
 
     async def _handle_listen_command(self, event: MessageEvent) -> str:
-        """Handle /listen [on|off] — toggle active listener mode.
+        """Handle /listen — toggle active listening for a chat.
 
-        When on, the bot reads every message and uses a cheap triage model
-        to decide whether to respond, act, or stay quiet. When off (default),
-        the bot only responds when @mentioned.
+        Usage:
+          /listen on     — enable (in a group, or /listen on <chat_id> from DM)
+          /listen off    — disable
+          /listen        — show current status
         """
         source = event.source
         if not _is_owner_user(source, self.config):
-            return "⛔ Only the bot owner can toggle listen mode."
+            return "⛔ Only the bot owner can toggle active listening."
 
-        from gateway.permissions import get_chat_listen_mode, set_chat_listen_mode
+        from gateway.permissions import get_active_listening, set_active_listening
 
         args = event.get_command_args().strip().lower()
         platform_name = source.platform.value if source.platform else "unknown"
-        chat_id = source.chat_id
 
-        if args in ("on", "true", "1", "yes"):
-            set_chat_listen_mode(platform_name, chat_id, True)
-            return "✅ Active listener mode **on** — I'll read every message and chime in when I have something useful to add."
-        elif args in ("off", "false", "0", "no"):
-            set_chat_listen_mode(platform_name, chat_id, False)
-            return "✅ Active listener mode **off** — I'll only respond when @mentioned."
+        # Parse chat_id — default to current chat in groups
+        parts = args.split()
+        if len(parts) >= 2 and parts[1].lstrip("-").isdigit():
+            chat_id = parts[1]
+            action = parts[0]
         else:
-            current = get_chat_listen_mode(platform_name, chat_id)
-            status = "on" if current else "off"
+            chat_id = source.chat_id
+            action = parts[0] if parts else ""
+
+        if action == "on":
+            set_active_listening(platform_name, chat_id, True)
+            return f"✅ Active listening enabled for chat `{chat_id}`. I'll review every message and chime in when useful."
+        elif action == "off":
+            set_active_listening(platform_name, chat_id, False)
+            return f"✅ Active listening disabled for chat `{chat_id}`. I'll only respond when @mentioned."
+        else:
+            current = get_active_listening(platform_name, chat_id)
+            status = "**on**" if current else "**off**"
             return (
-                f"Active listener mode is **{status}**.\n"
-                f"`/listen on` — read every message, respond when useful\n"
+                f"Active listening is {status} for this chat.\n"
+                f"`/listen on` — review every message, respond when useful\n"
                 f"`/listen off` — only respond when @mentioned"
             )
 

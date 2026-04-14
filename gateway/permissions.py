@@ -76,6 +76,31 @@ def _chat_key(platform: str, chat_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Active listening mode
+# ---------------------------------------------------------------------------
+
+def get_active_listening(platform: str, chat_id: str) -> bool:
+    """Check if a chat has active listening enabled."""
+    with _lock:
+        index = _load_index()
+        entry = index.get(_chat_key(platform, chat_id))
+        if entry is None:
+            return False
+        return bool(entry.get("active_listening", False))
+
+
+def set_active_listening(platform: str, chat_id: str, enabled: bool) -> None:
+    """Enable or disable active listening for a chat."""
+    with _lock:
+        index = _load_index()
+        key = _chat_key(platform, chat_id)
+        entry = index.get(key, {})
+        entry["active_listening"] = enabled
+        index[key] = entry
+        _save_index(index)
+
+
+# ---------------------------------------------------------------------------
 # Toolset management
 # ---------------------------------------------------------------------------
 
@@ -332,27 +357,6 @@ def list_chats(platform: str = None) -> Dict[str, dict]:
             return index
         prefix = f"{platform}:"
         return {k: v for k, v in index.items() if k.startswith(prefix)}
-
-
-def get_chat_listen_mode(platform: str, chat_id: str) -> bool:
-    """Check if a chat has active listener mode enabled."""
-    with _lock:
-        index = _load_index()
-        entry = index.get(_chat_key(platform, chat_id))
-        if entry is None:
-            return False
-        return entry.get("listen_mode", False)
-
-
-def set_chat_listen_mode(platform: str, chat_id: str, enabled: bool) -> None:
-    """Enable or disable active listener mode for a chat."""
-    with _lock:
-        index = _load_index()
-        key = _chat_key(platform, chat_id)
-        entry = index.get(key, {})
-        entry["listen_mode"] = enabled
-        index[key] = entry
-        _save_index(index)
 
 
 def remove_chat(platform: str, chat_id: str) -> bool:
