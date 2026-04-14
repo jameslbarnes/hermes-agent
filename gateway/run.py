@@ -2653,6 +2653,17 @@ class GatewayRunner:
                         "-d '{\"title\": \"...\", \"body\": \"...\"}' "
                         "https://api.github.com/repos/OWNER/REPO/issues\n```"
                     )
+                owner_name = os.environ.get("HERMES_OWNER_NAME", "").strip()
+                workspace_lines.append(
+                    "\n## Boundaries"
+                    "\nYou are operating in a sandboxed group chat. Important rules:"
+                    "\n- You can ONLY access files and repos within your workspace directory."
+                    "\n- You do NOT have access to the owner's personal memory, notes, skills, or private context."
+                    f"\n- If someone asks about {owner_name or 'the owner'} personally (opinions, background, preferences, etc.), "
+                    f"say \"Let me check with {owner_name or 'them'}\" and DO NOT make up an answer."
+                    "\n- Never fabricate tool call results. If a command fails or you can't access something, say so."
+                    "\n- Only share information that exists in this chat's workspace or that you retrieved via tools in this session."
+                )
                 context_prompt += "\n".join(workspace_lines)
 
         # If the previous session expired and was auto-reset, prepend a notice
@@ -7142,6 +7153,9 @@ class GatewayRunner:
             granted = get_chat_toolsets(platform_name, source.chat_id)
             if granted:
                 enabled_toolsets = sorted(granted)
+                # Filter out toolsets that could leak owner data
+                _OWNER_ONLY_TOOLSETS = {"skills", "memory", "session_search"}
+                enabled_toolsets = [t for t in enabled_toolsets if t not in _OWNER_ONLY_TOOLSETS]
                 _permissions_granted = True
                 logger.info(
                     "Non-owner chat %s — granted toolsets: %s",
