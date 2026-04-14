@@ -2090,7 +2090,13 @@ class TelegramAdapter(BasePlatformAdapter):
             is_listening = get_active_listening("telegram", chat_id)
             logger.info("[Telegram] Active listening check: chat_id=%s listening=%s", chat_id, is_listening)
             if is_listening:
-                message._active_listening_triage = True
+                # Track which chats have active listening so the gateway
+                # can check later (Telegram Message objects are frozen)
+                if not hasattr(self, "_active_listening_messages"):
+                    self._active_listening_messages = set()
+                msg_id = getattr(message, "message_id", None)
+                if msg_id:
+                    self._active_listening_messages.add(msg_id)
                 return True
         except Exception as e:
             logger.warning("[Telegram] Active listening check failed: %s", e)
@@ -2705,8 +2711,11 @@ class TelegramAdapter(BasePlatformAdapter):
             timestamp=message.date,
         )
         # Propagate active listening flag from _should_process_message
-        if getattr(message, "_active_listening_triage", False):
+        _al_msgs = getattr(self, "_active_listening_messages", set())
+        msg_id = getattr(message, "message_id", None)
+        if msg_id and msg_id in _al_msgs:
             event._active_listening_triage = True
+            _al_msgs.discard(msg_id)
         return event
 
     # ── Message reactions (processing lifecycle) ──────────────────────────
