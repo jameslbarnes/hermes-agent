@@ -87,6 +87,20 @@ logger = logging.getLogger(__name__)
 HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 
+
+def get_skills_dir() -> Path:
+    """Return the skills directory, scoped to the current chat if set.
+
+    When HERMES_SANDBOX_ROOT is set, skills are loaded from a `skills/`
+    subdirectory within the sandbox. This prevents non-owner chats from
+    accessing the owner's personal skills.
+    """
+    import os
+    sandbox = os.environ.get("HERMES_SANDBOX_ROOT", "").strip()
+    if sandbox:
+        return Path(sandbox) / "skills"
+    return HERMES_HOME / "skills"
+
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024

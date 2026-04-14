@@ -6713,6 +6713,19 @@ class GatewayRunner:
                 os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
             else:
                 os.environ["HERMES_ALLOWED_REPOS"] = ""
+            # Scope skills to the sandbox — group chats get their own
+            # skills directory so they can't load the owner's personal skills.
+            sandbox_path = os.environ.get("HERMES_SANDBOX_ROOT", "")
+            if sandbox_path:
+                try:
+                    import tools.skills_tool as _skills_mod
+                    from pathlib import Path as _P
+                    scoped_skills = _P(sandbox_path) / "skills"
+                    scoped_skills.mkdir(parents=True, exist_ok=True)
+                    _skills_mod.SKILLS_DIR = scoped_skills
+                except Exception:
+                    pass
+
             # Expose bot token as GITHUB_TOKEN so git/curl/gh can use it.
             # Save the original value so we can restore it on cleanup.
             bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
@@ -6763,6 +6776,13 @@ class GatewayRunner:
             # Original was None — bot token was set but no original existed
             os.environ.pop("GITHUB_TOKEN", None)
         self._original_github_token = None
+
+        # Restore global SKILLS_DIR to the owner's skills directory
+        try:
+            import tools.skills_tool as _skills_mod
+            _skills_mod.SKILLS_DIR = _skills_mod.HERMES_HOME / "skills"
+        except Exception:
+            pass
 
         # Clean up per-chat secrets
         for key in getattr(self, "_chat_secret_keys", []):
@@ -7153,8 +7173,9 @@ class GatewayRunner:
             granted = get_chat_toolsets(platform_name, source.chat_id)
             if granted:
                 enabled_toolsets = sorted(granted)
-                # Filter out toolsets that could leak owner data
-                _OWNER_ONLY_TOOLSETS = {"skills", "memory", "session_search"}
+                # Filter out toolsets that could leak owner data.
+                # Skills are allowed — they're scoped to the sandbox directory.
+                _OWNER_ONLY_TOOLSETS = {"memory", "session_search"}
                 enabled_toolsets = [t for t in enabled_toolsets if t not in _OWNER_ONLY_TOOLSETS]
                 _permissions_granted = True
                 logger.info(
