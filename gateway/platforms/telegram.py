@@ -2087,11 +2087,13 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             from gateway.permissions import get_active_listening
             chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
-            if get_active_listening("telegram", chat_id):
+            is_listening = get_active_listening("telegram", chat_id)
+            logger.info("[Telegram] Active listening check: chat_id=%s listening=%s", chat_id, is_listening)
+            if is_listening:
                 message._active_listening_triage = True
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[Telegram] Active listening check failed: %s", e)
         return False
 
     async def _handle_text_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
