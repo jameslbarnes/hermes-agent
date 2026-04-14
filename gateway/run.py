@@ -6590,11 +6590,12 @@ class GatewayRunner:
                 os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
             else:
                 os.environ["HERMES_ALLOWED_REPOS"] = ""
-            # Expose bot token as GITHUB_TOKEN so git/curl/gh can use it
+            # Expose bot token as GITHUB_TOKEN so git/curl/gh can use it.
+            # Save the original value so we can restore it on cleanup.
             bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
             if bot_token:
+                self._original_github_token = os.environ.get("GITHUB_TOKEN")
                 os.environ["GITHUB_TOKEN"] = bot_token
-                self._injected_github_token = True
 
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup
@@ -6631,10 +6632,14 @@ class GatewayRunner:
         for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS"]:
             if var in os.environ:
                 del os.environ[var]
-        # Only clear GITHUB_TOKEN if we injected it (from GITHUB_BOT_TOKEN)
-        if getattr(self, "_injected_github_token", False):
+        # Restore the original GITHUB_TOKEN if we overwrote it
+        original = getattr(self, "_original_github_token", None)
+        if original is not None:
+            os.environ["GITHUB_TOKEN"] = original
+        elif hasattr(self, "_original_github_token"):
+            # Original was None — bot token was set but no original existed
             os.environ.pop("GITHUB_TOKEN", None)
-            self._injected_github_token = False
+        self._original_github_token = None
 
         # Clean up per-chat secrets
         for key in getattr(self, "_chat_secret_keys", []):
