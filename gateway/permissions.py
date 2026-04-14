@@ -334,6 +334,27 @@ def list_chats(platform: str = None) -> Dict[str, dict]:
         return {k: v for k, v in index.items() if k.startswith(prefix)}
 
 
+def get_chat_listen_mode(platform: str, chat_id: str) -> bool:
+    """Check if a chat has active listener mode enabled."""
+    with _lock:
+        index = _load_index()
+        entry = index.get(_chat_key(platform, chat_id))
+        if entry is None:
+            return False
+        return entry.get("listen_mode", False)
+
+
+def set_chat_listen_mode(platform: str, chat_id: str, enabled: bool) -> None:
+    """Enable or disable active listener mode for a chat."""
+    with _lock:
+        index = _load_index()
+        key = _chat_key(platform, chat_id)
+        entry = index.get(key, {})
+        entry["listen_mode"] = enabled
+        index[key] = entry
+        _save_index(index)
+
+
 def remove_chat(platform: str, chat_id: str) -> bool:
     """Remove a chat from the permissions index."""
     with _lock:

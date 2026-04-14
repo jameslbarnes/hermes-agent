@@ -2375,6 +2375,9 @@ class GatewayRunner:
         if canonical == "repos":
             return await self._handle_repos_command(event)
 
+        if canonical == "listen":
+            return await self._handle_listen_command(event)
+
         if canonical in ("send", "edit", "skip"):
             return await self._handle_escalation_command(event, canonical)
 
@@ -3231,6 +3234,37 @@ class GatewayRunner:
                         "Let me check with James — I'll get back to you.",
                     )
                     return
+
+            # ── Active listener triage ─────────────────────────────────
+            # For listen-mode chats where the bot wasn't directly mentioned,
+            # run a cheap triage to decide whether to respond or stay quiet.
+            if not _is_owner_dm(source, self.config):
+                from gateway.permissions import get_chat_listen_mode
+                platform_name = source.platform.value if source.platform else "unknown"
+                # Check if the bot or owner was directly addressed
+                _bot_username = ""
+                adapter = self.adapters.get(source.platform)
+                if adapter and hasattr(adapter, "_bot") and adapter._bot:
+                    _bot_username = (getattr(adapter._bot, "username", "") or "").lower()
+                _was_mentioned = (
+                    event.get_command() is not None
+                    or _detect_owner_mention(message_text)
+                    or (_bot_username and f"@{_bot_username}" in message_text.lower())
+                )
+                if get_chat_listen_mode(platform_name, source.chat_id) and not _was_mentioned:
+                    triage_decision = await self._triage_message(
+                        message_text, source, history, context_prompt,
+                    )
+                    if triage_decision == "PASS":
+                        logger.info(
+                            "Triage: PASS for chat %s — staying quiet",
+                            source.chat_id,
+                        )
+                        return
+                    logger.info(
+                        "Triage: %s for chat %s — proceeding",
+                        triage_decision, source.chat_id,
+                    )
 
             # Run the agent
             agent_result = await self._run_agent(
@@ -4378,6 +4412,87 @@ class GatewayRunner:
             return raw.guild.id
         return None
 
+    async def _triage_message(
+        self, message: str, source, history: list, context_prompt: str,
+    ) -> str:
+        """Decide whether to respond to a message in a listen-mode chat.
+
+        Uses a cheap/fast model to classify the message as:
+          PASS     — nothing relevant, stay quiet
+          RESPOND  — has something useful to contribute
+          ACT      — should take a concrete action (create issue, look something up, etc.)
+
+        Returns one of: "PASS", "RESPOND", "ACT"
+        """
+        from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+
+        # Build context from recent history (last ~10 messages for context)
+        recent = history[-10:] if len(history) > 10 else history
+        history_text = ""
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(
+                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+                )
+            if content:
+                history_text += f"[{role}]: {content[:200]}\n"
+
+        # Read the group's scoped memory for context
+        group_memory = ""
+        scope = os.environ.get("HERMES_MEMORY_SCOPE", "")
+        if scope:
+            try:
+                from hermes_constants import get_hermes_home
+                mem_file = get_hermes_home() / "memories" / "chats" / scope / "MEMORY.md"
+                if mem_file.exists():
+                    group_memory = mem_file.read_text(encoding="utf-8").strip()[:1500]
+            except Exception:
+                pass
+
+        system_prompt = (
+            "You are a triage system for a group chat assistant. Your job is to decide "
+            "whether the assistant should respond to the latest message.\n\n"
+            "The assistant is a helpful AI that participates in a group chat between collaborators. "
+            "It has access to tools (terminal, file operations, GitHub API). "
+            "It should speak up when it can add value — answering questions, offering context, "
+            "taking action on tasks, or flagging things the team should know.\n\n"
+            "It should stay quiet when the message is casual chatter, greetings, acknowledgments, "
+            "or discussion that doesn't need AI input.\n\n"
+            "Respond with EXACTLY one word: PASS, RESPOND, or ACT\n"
+            "- PASS: Stay quiet. Nothing to add.\n"
+            "- RESPOND: The assistant has something useful to say.\n"
+            "- ACT: The assistant should take a concrete action (create issue, look something up, run a command, etc.)\n"
+        )
+
+        user_prompt = ""
+        if group_memory:
+            user_prompt += f"Group memory/context:\n{group_memory}\n\n"
+        if history_text:
+            user_prompt += f"Recent conversation:\n{history_text}\n\n"
+        user_prompt += f"Latest message: {message}\n\nDecision (one word):"
+
+        try:
+            response = await async_call_llm(
+                task="triage",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=10,
+            )
+            content = extract_content_or_reasoning(response)
+            if content:
+                decision = content.strip().upper().split()[0]
+                if decision in ("PASS", "RESPOND", "ACT"):
+                    return decision
+            return "PASS"  # Default to quiet if triage is unclear
+        except Exception as e:
+            logger.warning("Triage failed: %s — defaulting to PASS", e)
+            return "PASS"
+
     async def _handle_escalation_command(self, event: MessageEvent, action: str) -> str:
         """Handle /send, /edit, /skip for owner mention escalations.
 
@@ -4566,6 +4681,38 @@ class GatewayRunner:
                 return f"✅ Revoked {removed_str} from `{chat_id}`.\nRemaining: {remaining_str}"
 
         return "Unknown permissions action."
+
+    async def _handle_listen_command(self, event: MessageEvent) -> str:
+        """Handle /listen [on|off] — toggle active listener mode.
+
+        When on, the bot reads every message and uses a cheap triage model
+        to decide whether to respond, act, or stay quiet. When off (default),
+        the bot only responds when @mentioned.
+        """
+        source = event.source
+        if not _is_owner_user(source, self.config):
+            return "⛔ Only the bot owner can toggle listen mode."
+
+        from gateway.permissions import get_chat_listen_mode, set_chat_listen_mode
+
+        args = event.get_command_args().strip().lower()
+        platform_name = source.platform.value if source.platform else "unknown"
+        chat_id = source.chat_id
+
+        if args in ("on", "true", "1", "yes"):
+            set_chat_listen_mode(platform_name, chat_id, True)
+            return "✅ Active listener mode **on** — I'll read every message and chime in when I have something useful to add."
+        elif args in ("off", "false", "0", "no"):
+            set_chat_listen_mode(platform_name, chat_id, False)
+            return "✅ Active listener mode **off** — I'll only respond when @mentioned."
+        else:
+            current = get_chat_listen_mode(platform_name, chat_id)
+            status = "on" if current else "off"
+            return (
+                f"Active listener mode is **{status}**.\n"
+                f"`/listen on` — read every message, respond when useful\n"
+                f"`/listen off` — only respond when @mentioned"
+            )
 
     async def _handle_repos_command(self, event: MessageEvent) -> str:
         """Handle /repos — manage allowed repos for a chat.

@@ -2064,8 +2064,16 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         if not self._is_group_chat(message):
             return True
-        if str(getattr(getattr(message, "chat", None), "id", "")) in self._telegram_free_response_chats():
+        chat_id = str(getattr(getattr(message, "chat", None), "id", ""))
+        if chat_id in self._telegram_free_response_chats():
             return True
+        # Active listener mode — let the message through for triage
+        try:
+            from gateway.permissions import get_chat_listen_mode
+            if get_chat_listen_mode("telegram", chat_id):
+                return True
+        except Exception:
+            pass
         if not self._telegram_require_mention():
             return True
         if is_command:

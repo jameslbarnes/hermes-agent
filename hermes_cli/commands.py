@@ -148,6 +148,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[list|show <chat_id>]"),
     CommandDef("repos", "Manage allowed repos for a chat", "Permissions",
                gateway_only=True, args_hint="<chat_id> [+repo] [-repo]"),
+    CommandDef("listen", "Toggle active listener mode (triage every message)", "Permissions",
+               gateway_only=True, args_hint="[on|off]"),
 
     # Escalation (owner mention draft/approve)
     CommandDef("send", "Send a pending draft response to a group chat", "Escalation",
