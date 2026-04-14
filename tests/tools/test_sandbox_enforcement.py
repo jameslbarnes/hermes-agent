@@ -173,6 +173,18 @@ class TestTerminalToolSandbox:
         )
         assert result is not None
 
+    def test_urls_not_blocked_as_paths(self, sandbox_env):
+        """URLs with paths should not be treated as filesystem paths."""
+        from tools.terminal_tool import _enforce_sandbox
+        assert _enforce_sandbox(
+            'curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/owner/repo/issues',
+            str(sandbox_env), None
+        ) is None
+        assert _enforce_sandbox(
+            'curl https://example.com/some/deep/path',
+            str(sandbox_env), None
+        ) is None
+
     def test_relative_commands_allowed(self, sandbox_env):
         """Commands without absolute paths should be allowed."""
         from tools.terminal_tool import _enforce_sandbox

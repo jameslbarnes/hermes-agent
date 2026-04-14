@@ -172,10 +172,18 @@ def _enforce_sandbox(command: str, sandbox_root: str, workdir: str | None = None
     allowed_repos = [r.strip() for r in allowed_repos_raw.split(",") if r.strip()] if allowed_repos_raw else []
 
     # Check for absolute paths outside sandbox
-    # Match /foo/bar patterns but not flags like -/
-    abs_path_pattern = re.compile(r'(?<![a-zA-Z0-9_\-])(/[a-zA-Z][a-zA-Z0-9_/.\-]*)')
+    # Match /foo/bar patterns but not flags like -/, and not URL paths
+    abs_path_pattern = re.compile(r'(?<![a-zA-Z0-9_\-:/])(/[a-zA-Z][a-zA-Z0-9_/.\-]*)')
     for match in abs_path_pattern.finditer(command):
         path_str = match.group(1)
+        # Skip if this is part of a URL (preceded by :// or a domain)
+        start = match.start(1)
+        if start >= 3 and command[start-3:start] == "://":
+            continue
+        # Also skip if preceded by a domain-like pattern (e.g. api.github.com/...)
+        preceding = command[:start]
+        if re.search(r'[a-zA-Z0-9]\.[a-zA-Z]{2,}$', preceding):
+            continue
         # Skip common system paths that are read-only and safe
         safe_prefixes = ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
                          "/tmp", "/usr/bin", "/usr/local/bin", "/bin", "/proc/self")
