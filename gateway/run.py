@@ -7174,8 +7174,8 @@ class GatewayRunner:
             if granted:
                 enabled_toolsets = sorted(granted)
                 # Filter out toolsets that could leak owner data.
-                # Skills are allowed — they're scoped to the sandbox directory.
-                _OWNER_ONLY_TOOLSETS = {"memory", "session_search"}
+                # Skills and memory are allowed — they're scoped to the sandbox/chat.
+                _OWNER_ONLY_TOOLSETS = {"session_search"}
                 enabled_toolsets = [t for t in enabled_toolsets if t not in _OWNER_ONLY_TOOLSETS]
                 _permissions_granted = True
                 logger.info(
