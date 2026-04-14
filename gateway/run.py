@@ -6594,6 +6594,7 @@ class GatewayRunner:
             bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
             if bot_token:
                 os.environ["GITHUB_TOKEN"] = bot_token
+                self._injected_github_token = True
 
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup
@@ -6627,9 +6628,13 @@ class GatewayRunner:
 
     def _clear_session_env(self) -> None:
         """Clear session environment variables and per-chat secrets."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS", "GITHUB_TOKEN"]:
+        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS"]:
             if var in os.environ:
                 del os.environ[var]
+        # Only clear GITHUB_TOKEN if we injected it (from GITHUB_BOT_TOKEN)
+        if getattr(self, "_injected_github_token", False):
+            os.environ.pop("GITHUB_TOKEN", None)
+            self._injected_github_token = False
 
         # Clean up per-chat secrets
         for key in getattr(self, "_chat_secret_keys", []):
@@ -7428,6 +7433,10 @@ class GatewayRunner:
 
             if agent is None:
                 # Config changed or first message — create fresh agent
+                logger.info(
+                    "Creating agent with enabled_toolsets=%s for session %s",
+                    enabled_toolsets, session_key,
+                )
                 agent = AIAgent(
                     model=turn_route["model"],
                     **turn_route["runtime"],
@@ -7449,6 +7458,12 @@ class GatewayRunner:
                     user_id=source.user_id,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
+                )
+                _tool_count = len(agent.tools) if hasattr(agent, 'tools') and agent.tools else 0
+                _tool_names = sorted(agent.valid_tool_names) if hasattr(agent, 'valid_tool_names') else []
+                logger.info(
+                    "Agent created: %d tools loaded: %s",
+                    _tool_count, _tool_names,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
