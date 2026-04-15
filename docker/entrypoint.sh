@@ -31,14 +31,26 @@ if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
-# Ensure shared group sessions (not per-user) in config.yaml
+# Ensure correct config.yaml settings
 python3 -c "
 import yaml
 cfg_path = '$HERMES_HOME/config.yaml'
 with open(cfg_path) as f:
     cfg = yaml.safe_load(f) or {}
+changed = False
 if cfg.get('group_sessions_per_user') is not False:
     cfg['group_sessions_per_user'] = False
+    changed = True
+# Use Groq for STT if GROQ_API_KEY is available
+import os
+if os.environ.get('GROQ_API_KEY') and cfg.get('stt', {}).get('provider') != 'groq':
+    cfg.setdefault('stt', {})
+    cfg['stt']['provider'] = 'groq'
+    cfg['stt']['enabled'] = True
+    # Remove model override that might force OpenAI
+    cfg['stt'].pop('model', None)
+    changed = True
+if changed:
     with open(cfg_path, 'w') as f:
         yaml.dump(cfg, f, default_flow_style=False)
 " 2>/dev/null || true
