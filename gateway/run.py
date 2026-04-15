@@ -6736,12 +6736,16 @@ class GatewayRunner:
                 except Exception:
                     pass
 
-            # Expose bot token as GITHUB_TOKEN so git/curl/gh can use it.
-            # Save the original value so we can restore it on cleanup.
+            # Replace GITHUB_TOKEN with the bot token for non-owner chats.
+            # The personal token must not be accessible — it has broader
+            # repo access than the bot token's scoped permissions.
             bot_token = os.environ.get("GITHUB_BOT_TOKEN", "").strip()
+            self._original_github_token = os.environ.get("GITHUB_TOKEN")
             if bot_token:
-                self._original_github_token = os.environ.get("GITHUB_TOKEN")
                 os.environ["GITHUB_TOKEN"] = bot_token
+            elif "GITHUB_TOKEN" in os.environ:
+                # No bot token configured — remove personal token entirely
+                del os.environ["GITHUB_TOKEN"]
 
         # ── Per-chat secrets injection ──────────────────────────────────
         self._chat_secret_keys: list[str] = []  # track for cleanup
