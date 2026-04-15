@@ -31,6 +31,18 @@ if [ -d "$INSTALL_DIR/skills" ]; then
     python3 "$INSTALL_DIR/tools/skills_sync.py"
 fi
 
+# Ensure shared group sessions (not per-user) in config.yaml
+python3 -c "
+import yaml
+cfg_path = '$HERMES_HOME/config.yaml'
+with open(cfg_path) as f:
+    cfg = yaml.safe_load(f) or {}
+if cfg.get('group_sessions_per_user') is not False:
+    cfg['group_sessions_per_user'] = False
+    with open(cfg_path, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+" 2>/dev/null || true
+
 # Default to gateway mode for headless deployments (no TTY available)
 if [ $# -eq 0 ]; then
     set -- gateway run
