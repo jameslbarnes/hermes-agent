@@ -3300,8 +3300,18 @@ class GatewayRunner:
                     and not _detect_owner_mention(message_text)
                     and getattr(event, "_active_listening_triage", False)):
                 _chat_label = source.chat_name or source.chat_id
+                # Build recent context from conversation history (last ~10 messages)
+                _recent_lines = []
+                for msg in history[-10:]:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+                    if content and role in ("user", "assistant"):
+                        _recent_lines.append(f"{'User' if role == 'user' else 'Bot'}: {content[:200]}")
+                _recent_context = "\n".join(_recent_lines) if _recent_lines else ""
                 should_engage = await _triage_message(
-                    message_text, _chat_label,
+                    message_text, _chat_label, _recent_context,
                 )
                 if not should_engage:
                     logger.info(
