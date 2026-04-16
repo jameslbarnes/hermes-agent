@@ -168,8 +168,6 @@ def _enforce_sandbox(command: str, sandbox_root: str, workdir: str | None = None
     from pathlib import Path as _P
 
     sandbox = _P(sandbox_root).resolve()
-    allowed_repos_raw = os.environ.get("HERMES_ALLOWED_REPOS", "").strip()
-    allowed_repos = [r.strip() for r in allowed_repos_raw.split(",") if r.strip()] if allowed_repos_raw else []
 
     # Check for absolute paths outside sandbox
     # Match /foo/bar patterns but not flags like -/, and not URL paths
@@ -198,27 +196,6 @@ def _enforce_sandbox(command: str, sandbox_root: str, workdir: str | None = None
                 )
         except (OSError, ValueError):
             pass
-
-    # Check git remote operations against repo allowlist
-    git_remote_patterns = [
-        # git clone <url>, git remote add <name> <url>, git push <url>, git fetch <url>
-        re.compile(r'git\s+(?:clone|remote\s+add\s+\S+|push|pull|fetch)\s+(?:--\S+\s+)*(\S+)', re.I),
-        # gh repo clone <owner/repo>
-        re.compile(r'gh\s+repo\s+clone\s+(\S+)', re.I),
-    ]
-    for pattern in git_remote_patterns:
-        m = pattern.search(command)
-        if m:
-            url = m.group(1)
-            # Skip if it looks like a branch name or flag
-            if url.startswith("-") or "/" not in url:
-                continue
-            from gateway.permissions import is_repo_allowed
-            if not is_repo_allowed(url, allowed_repos):
-                return (
-                    f"Blocked: repo '{url}' is not in this chat's allowed repos. "
-                    f"Allowed: {', '.join(allowed_repos) if allowed_repos else '(none)'}"
-                )
 
     return None
 

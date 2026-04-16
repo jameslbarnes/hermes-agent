@@ -2634,16 +2634,12 @@ class GatewayRunner:
             # ── Workspace context for non-owner chats ─────────────────
             # Tell the agent about its sandbox, repos, and capabilities.
             sandbox_root = os.environ.get("HERMES_SANDBOX_ROOT", "")
-            allowed_repos = os.environ.get("HERMES_ALLOWED_REPOS", "")
             has_github_token = bool(os.environ.get("GITHUB_TOKEN", ""))
             if sandbox_root:
                 workspace_lines = [
                     "\n## Workspace",
                     f"Your working directory is `{sandbox_root}`. All file and terminal operations are restricted to this directory.",
                 ]
-                if allowed_repos:
-                    repos_list = [r.strip() for r in allowed_repos.split(",") if r.strip()]
-                    workspace_lines.append(f"**Allowed repos:** {', '.join(repos_list)}")
                 if has_github_token:
                     workspace_lines.append(
                         "**GitHub access:** You have a `GITHUB_TOKEN` environment variable set. "
@@ -6704,7 +6700,6 @@ class GatewayRunner:
         if _is_owner_dm(context.source, self.config):
             os.environ.pop("HERMES_MEMORY_SCOPE", None)
             os.environ.pop("HERMES_SANDBOX_ROOT", None)
-            os.environ.pop("HERMES_ALLOWED_REPOS", None)
         else:
             os.environ["HERMES_MEMORY_SCOPE"] = f"{platform_value}:{chat_id}"
             # ── Sandbox scoping ────────────────────────────────────────
@@ -6719,10 +6714,6 @@ class GatewayRunner:
                 fallback_sandbox = str(WORKSPACES_ROOT / f"{platform_value}:{chat_id}")
                 os.makedirs(fallback_sandbox, exist_ok=True)
                 os.environ["HERMES_SANDBOX_ROOT"] = fallback_sandbox
-            if repos:
-                os.environ["HERMES_ALLOWED_REPOS"] = ",".join(repos)
-            else:
-                os.environ["HERMES_ALLOWED_REPOS"] = ""
             # Scope skills to the sandbox — group chats get their own
             # skills directory so they can't load the owner's personal skills.
             sandbox_path = os.environ.get("HERMES_SANDBOX_ROOT", "")
@@ -6779,7 +6770,7 @@ class GatewayRunner:
 
     def _clear_session_env(self) -> None:
         """Clear session environment variables and per-chat secrets."""
-        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT", "HERMES_ALLOWED_REPOS"]:
+        for var in ["HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID", "HERMES_SESSION_CHAT_NAME", "HERMES_SESSION_THREAD_ID", "HERMES_MEMORY_SCOPE", "HERMES_SANDBOX_ROOT"]:
             if var in os.environ:
                 del os.environ[var]
         # Restore the original GITHUB_TOKEN if we overwrote it

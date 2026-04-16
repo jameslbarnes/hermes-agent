@@ -124,54 +124,17 @@ class TestTerminalToolSandbox:
         assert _enforce_sandbox("ls /usr/bin/git", str(sandbox_env), None) is None
         assert _enforce_sandbox("cat /tmp/test", str(sandbox_env), None) is None
 
-    def test_git_clone_allowed_repo(self, sandbox_env):
+    def test_git_clone_not_blocked(self, sandbox_env):
+        """Git operations are allowed — repo access is controlled by the bot token."""
         from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "git clone https://github.com/owner/allowed-repo.git",
+        assert _enforce_sandbox(
+            "git clone https://github.com/any/repo.git",
             str(sandbox_env), None
-        )
-        assert result is None
-
-    def test_git_clone_disallowed_repo(self, sandbox_env):
-        from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "git clone https://github.com/evil/secret-repo.git",
+        ) is None
+        assert _enforce_sandbox(
+            "git clone git@github.com:any/repo.git",
             str(sandbox_env), None
-        )
-        assert result is not None
-        assert "not in this chat" in result.lower()
-
-    def test_git_push_disallowed_repo(self, sandbox_env):
-        from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "git push https://github.com/evil/repo main",
-            str(sandbox_env), None
-        )
-        assert result is not None
-
-    def test_git_clone_ssh_disallowed(self, sandbox_env):
-        from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "git clone git@github.com:evil/repo.git",
-            str(sandbox_env), None
-        )
-        assert result is not None
-
-    def test_git_clone_ssh_allowed(self, sandbox_env):
-        from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "git clone git@github.com:owner/allowed-repo.git",
-            str(sandbox_env), None
-        )
-        assert result is None
-
-    def test_gh_repo_clone_disallowed(self, sandbox_env):
-        from tools.terminal_tool import _enforce_sandbox
-        result = _enforce_sandbox(
-            "gh repo clone evil/secret-repo",
-            str(sandbox_env), None
-        )
-        assert result is not None
+        ) is None
 
     def test_urls_not_blocked_as_paths(self, sandbox_env):
         """URLs with paths should not be treated as filesystem paths."""
