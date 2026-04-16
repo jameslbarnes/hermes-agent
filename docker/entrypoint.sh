@@ -41,6 +41,11 @@ changed = False
 if cfg.get('group_sessions_per_user') is not False:
     cfg['group_sessions_per_user'] = False
     changed = True
+# Disable tool progress spam in Telegram
+display = cfg.setdefault('display', {})
+if display.get('tool_progress') != 'off':
+    display['tool_progress'] = 'off'
+    changed = True
 # Use Groq for STT if GROQ_API_KEY is available
 import os
 if os.environ.get('GROQ_API_KEY') and cfg.get('stt', {}).get('provider') != 'groq':
