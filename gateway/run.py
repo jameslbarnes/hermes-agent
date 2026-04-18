@@ -3126,6 +3126,7 @@ class GatewayRunner:
         # -----------------------------------------------------------------
         if event.media_urls and event.message_type == MessageType.DOCUMENT:
             import mimetypes as _mimetypes
+            from gateway.platforms.base import extract_document_text as _extract_document_text
             _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
@@ -3151,19 +3152,31 @@ class GatewayRunner:
                 import re as _re
                 display_name = _re.sub(r'[^\w.\- ]', '_', display_name)
 
-                if mtype.startswith("text/"):
+                # Try to extract text content so the agent sees it directly.
+                # This handles .docx, .txt, .md, etc. without requiring the
+                # agent to read the file (which may be blocked by sandbox).
+                extracted_text = _extract_document_text(path)
+                if extracted_text is not None:
+                    context_note = (
+                        f"[The user sent a document: '{display_name}'. "
+                        f"Its content has been extracted and included below. "
+                        f"The file is also saved at: {path}]"
+                    )
+                    message_text = f"{context_note}\n\n{extracted_text}\n\n{message_text}"
+                elif mtype.startswith("text/"):
                     context_note = (
                         f"[The user sent a text document: '{display_name}'. "
                         f"Its content has been included below. "
                         f"The file is also saved at: {path}]"
                     )
+                    message_text = f"{context_note}\n\n{message_text}"
                 else:
                     context_note = (
                         f"[The user sent a document: '{display_name}'. "
                         f"The file is saved at: {path}. "
                         f"Ask the user what they'd like you to do with it.]"
                     )
-                message_text = f"{context_note}\n\n{message_text}"
+                    message_text = f"{context_note}\n\n{message_text}"
 
         # -----------------------------------------------------------------
         # Inject reply context when user replies to a message not in history.

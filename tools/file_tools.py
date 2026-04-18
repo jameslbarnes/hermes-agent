@@ -18,6 +18,10 @@ def _check_file_sandbox(path: str) -> str | None:
     """If HERMES_SANDBOX_ROOT is set, verify the path is inside the sandbox.
 
     Returns None if allowed, or a JSON error string if blocked.
+
+    In addition to the sandbox root, read access is granted to the Hermes
+    cache directories (documents, images, audio, screenshots) so the agent
+    can read files cached by the gateway (e.g. user-uploaded documents).
     """
     sandbox_root = os.environ.get("HERMES_SANDBOX_ROOT", "").strip()
     if not sandbox_root:
@@ -27,6 +31,22 @@ def _check_file_sandbox(path: str) -> str | None:
         target = Path(path).expanduser().resolve()
         if target == sandbox or sandbox in target.parents:
             return None
+        # Allow read access to Hermes cache directories (document/image/audio).
+        # These hold files cached by the gateway from user uploads.
+        try:
+            from hermes_constants import get_hermes_dir
+            _CACHE_SUBDIRS = [
+                ("cache/documents", "document_cache"),
+                ("cache/images", "image_cache"),
+                ("cache/audio", "audio_cache"),
+                ("cache/screenshots", "browser_screenshots"),
+            ]
+            for new_sub, old_name in _CACHE_SUBDIRS:
+                cache_dir = get_hermes_dir(new_sub, old_name).resolve()
+                if target == cache_dir or cache_dir in target.parents:
+                    return None
+        except Exception:
+            pass
         return json.dumps({
             "error": (
                 f"Blocked: path '{path}' is outside this chat's workspace. "

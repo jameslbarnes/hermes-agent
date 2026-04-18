@@ -344,6 +344,74 @@ def cache_document_from_bytes(data: bytes, filename: str) -> str:
     return str(filepath)
 
 
+def extract_document_text(file_path: str, max_bytes: int = 100 * 1024) -> str | None:
+    """Extract plain text from a document file using only stdlib.
+
+    Supported formats:
+    - .docx  (Office Open XML — zip of XML)
+    - .txt, .md, .csv, .log, .json, .xml, .yaml, .yml, .toml, .ini, .cfg
+      (read as UTF-8 text)
+
+    Returns the extracted text, or None if extraction fails or the format
+    is unsupported.  Skips files larger than *max_bytes* to avoid context
+    window bloat.
+
+    This is intentionally dependency-free (no python-docx) so the gateway
+    can always inject document content for the agent without extra pip
+    installs.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    path = Path(file_path)
+    if not path.is_file():
+        return None
+
+    # Skip very large files
+    try:
+        if path.stat().st_size > max_bytes:
+            return None
+    except OSError:
+        return None
+
+    ext = path.suffix.lower()
+
+    # Plain-text family — just read as UTF-8
+    _PLAIN_TEXT_EXTENSIONS = {
+        ".txt", ".md", ".csv", ".log", ".json", ".xml",
+        ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    }
+    if ext in _PLAIN_TEXT_EXTENSIONS:
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    # .docx — Office Open XML word processing
+    if ext == ".docx":
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                # word/document.xml contains the main body
+                if "word/document.xml" not in zf.namelist():
+                    return None
+                xml_bytes = zf.read("word/document.xml")
+            root = ET.fromstring(xml_bytes)
+            # Namespace for Word ML
+            ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = []
+            for p_elem in root.iter(f"{ns}p"):
+                texts = []
+                for t_elem in p_elem.iter(f"{ns}t"):
+                    if t_elem.text:
+                        texts.append(t_elem.text)
+                paragraphs.append("".join(texts))
+            return "\n".join(paragraphs)
+        except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
+            return None
+
+    return None
+
+
 def cleanup_document_cache(max_age_hours: int = 24) -> int:
     """
     Delete cached documents older than *max_age_hours*.
