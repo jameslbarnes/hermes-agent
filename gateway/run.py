@@ -536,6 +536,8 @@ def _is_owner_user(source: "SessionSource", gateway_config) -> bool:
     Used for command authorization — the owner can run /allow, /repos, etc.
     from any chat.
     """
+    if gateway_config is None or not hasattr(gateway_config, 'get_home_channel'):
+        return False
     home = gateway_config.get_home_channel(source.platform)
     if home is None:
         return False
@@ -551,7 +553,11 @@ def _is_owner_dm(source: "SessionSource", gateway_config) -> bool:
       2. The chat_id matches the platform's configured home_channel
     Everything else (groups, other users' DMs, channels) returns False.
     """
+    if gateway_config is None:
+        return False
     if source.chat_type != "dm":
+        return False
+    if not hasattr(gateway_config, 'get_home_channel'):
         return False
     home = gateway_config.get_home_channel(source.platform)
     if home is None:
@@ -680,6 +686,7 @@ class GatewayRunner:
 
     # Class-level defaults so partial construction in tests doesn't
     # blow up on attribute access.
+    config: Optional["GatewayConfig"] = None
     _running_agents_ts: Dict[str, float] = {}
     
     def __init__(self, config: Optional[GatewayConfig] = None):
