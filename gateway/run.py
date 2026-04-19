@@ -2654,11 +2654,12 @@ class GatewayRunner:
                     "\n## Boundaries"
                     "\nYou are operating in a sandboxed group chat. Important rules:"
                     "\n- You can ONLY access files and repos within your workspace directory."
-                    "\n- You do NOT have access to the owner's personal memory, notes, skills, or private context."
+                    "\n- You have your OWN scoped memory and session history for this chat. Use them proactively."
+                    "\n- You do NOT have access to the owner's personal/DM memory, notes, or private context."
                     f"\n- If someone asks about {owner_name or 'the owner'} personally (opinions, background, preferences, etc.), "
                     f"say \"Let me check with {owner_name or 'them'}\" and DO NOT make up an answer."
                     "\n- Never fabricate tool call results. If a command fails or you can't access something, say so."
-                    "\n- Only share information that exists in this chat's workspace or that you retrieved via tools in this session."
+                    "\n- Only share information that exists in this chat's workspace, memory, or that you retrieved via tools in this session."
                 )
                 context_prompt += "\n".join(workspace_lines)
 
@@ -7192,8 +7193,9 @@ class GatewayRunner:
             if granted:
                 enabled_toolsets = sorted(granted)
                 # Filter out toolsets that could leak owner data.
-                # Skills and memory are allowed — they're scoped to the sandbox/chat.
-                _OWNER_ONLY_TOOLSETS = {"session_search"}
+                # Skills, memory, and session_search are allowed — they're scoped
+                # to the sandbox/chat via HERMES_MEMORY_SCOPE.
+                _OWNER_ONLY_TOOLSETS: set[str] = set()  # All toolsets now properly scoped
                 enabled_toolsets = [t for t in enabled_toolsets if t not in _OWNER_ONLY_TOOLSETS]
                 _permissions_granted = True
                 logger.info(
