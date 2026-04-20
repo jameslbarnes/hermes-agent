@@ -2087,14 +2087,17 @@ class GatewayRunner:
         # they can grant permissions via /allow.
         from gateway.permissions import record_chat
         if not _is_owner_dm(source, self.config):
-            platform_name = source.platform.value if source.platform else "unknown"
-            is_new = record_chat(
-                platform_name,
-                source.chat_id,
-                chat_name=source.chat_name or "",
-                chat_type=source.chat_type or "",
-                user_name=source.user_name or "",
-            )
+            try:
+                platform_name = source.platform.value if source.platform else "unknown"
+                is_new = record_chat(
+                    str(platform_name),
+                    str(source.chat_id),
+                    chat_name=str(source.chat_name or ""),
+                    chat_type=str(source.chat_type or ""),
+                    user_name=str(source.user_name or ""),
+                )
+            except Exception:
+                is_new = False
             if is_new:
                 home = self.config.get_home_channel(source.platform)
                 adapter = self.adapters.get(source.platform)
@@ -3334,6 +3337,14 @@ class GatewayRunner:
                     logger.info(
                         "Triage: PASS for chat %s — '%s'",
                         source.chat_id, message_text[:80],
+                    )
+                    # Still save the message to the transcript so the bot
+                    # has context if it's tagged later. Without this, PASSed
+                    # messages vanish and the bot can't follow the conversation.
+                    _user_label = source.user_name or source.user_id or "user"
+                    self.session_store.append_to_transcript(
+                        session_entry.session_id,
+                        {"role": "user", "content": f"[{_user_label}]: {message_text}"},
                     )
                     return
                 logger.info(
@@ -5318,7 +5329,7 @@ class GatewayRunner:
             platform_key = _platform_config_key(source.platform)
 
             from hermes_cli.tools_config import _get_platform_tools
-            if _is_owner_dm(source, self.config):
+            if self.config is None or _is_owner_dm(source, self.config):
                 enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
             else:
                 from gateway.permissions import get_chat_toolsets
@@ -7191,7 +7202,8 @@ class GatewayRunner:
 
         from hermes_cli.tools_config import _get_platform_tools
         _permissions_granted = False
-        if _is_owner_dm(source, self.config):
+        if self.config is None or _is_owner_dm(source, self.config):
+            # Owner DM or no config (test mode) — full platform toolset
             enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
         else:
             from gateway.permissions import get_chat_toolsets
