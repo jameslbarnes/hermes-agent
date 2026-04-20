@@ -89,17 +89,28 @@ SKILLS_DIR = HERMES_HOME / "skills"
 
 
 def get_skills_dir() -> Path:
-    """Return the skills directory, scoped to the current chat if set.
+    """Return the primary skills directory, scoped to the current chat if set.
 
     When HERMES_SANDBOX_ROOT is set, skills are loaded from a `skills/`
     subdirectory within the sandbox. This prevents non-owner chats from
-    accessing the owner's personal skills.
+    writing to the owner's personal skills.
     """
     import os
     sandbox = os.environ.get("HERMES_SANDBOX_ROOT", "").strip()
     if sandbox:
         return Path(sandbox) / "skills"
     return HERMES_HOME / "skills"
+
+
+def get_global_skills_dir() -> Path:
+    """Return the global (owner's) skills directory for read-only fallback.
+
+    Non-owner chats can VIEW skills from the global directory but cannot
+    create/edit/delete them. This ensures group chats have access to skill
+    instructions (like google-workspace, github-auth) even though their
+    primary SKILLS_DIR is sandbox-scoped.
+    """
+    return get_hermes_home() / "skills"
 
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
@@ -550,10 +561,15 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
-    # Scan local dir first, then external dirs (local takes precedence)
+    # Scan local dir first, then global fallback, then external dirs
+    # (local/sandbox takes precedence; global ensures group chats see all skills)
     dirs_to_scan = []
     if SKILLS_DIR.exists():
         dirs_to_scan.append(SKILLS_DIR)
+    # Add global skills as fallback for sandboxed (non-owner) chats
+    _global = get_global_skills_dir()
+    if _global != SKILLS_DIR and _global.exists():
+        dirs_to_scan.append(_global)
     dirs_to_scan.extend(get_external_skills_dirs())
 
     for scan_dir in dirs_to_scan:
@@ -814,9 +830,13 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
         from agent.skill_utils import get_external_skills_dirs
 
         # Build list of all skill directories to search
+        # Include global skills as read-only fallback for sandboxed chats
         all_dirs = []
         if SKILLS_DIR.exists():
             all_dirs.append(SKILLS_DIR)
+        _global = get_global_skills_dir()
+        if _global != SKILLS_DIR and _global.exists():
+            all_dirs.append(_global)
         all_dirs.extend(get_external_skills_dirs())
 
         if not all_dirs:
